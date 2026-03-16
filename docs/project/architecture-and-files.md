@@ -171,9 +171,11 @@ dagent/
 - `src/tui/use-agent-state.ts`
   - 顶层状态 Hook：监听 UI 事件并维护状态树（状态、思考文本、工具历史、当前工具、对话记录）。
   - 维护 Weave DAG 节点状态（父子关系、状态、时间戳、过程明细）。
+  - 工具重试可视化：识别 `retry=x/y` detail，并将节点临时切换为 `retrying` 状态，保存重试计数。
 - `src/tui/App.tsx`
   - Ink 组件树入口，渲染消息流与 WEAVE DAG 树；负责交互输入与多轮调用调度。
   - DAG 支持当前节点高亮、节点耗时、明细折叠/展开（空输入下 `↑/↓` 选中，`Enter` 切换）。
+  - DAG 状态图标支持重试中计数展示：`↻(x/y)`；最终状态回落 `✔/✖`。
   - Step Gate 模式下支持审批键位交互：`Enter` 放行、`E` 编辑参数、`S` 跳过、`Q` 终止。
   - 输入监听在非 TTY 场景自动失活，避免 raw mode 报错。
 - `src/tui/weave-mode.ts`

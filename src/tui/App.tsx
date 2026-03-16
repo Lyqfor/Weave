@@ -32,9 +32,12 @@ const THEME = {
   danger: "#F3A2A2",
   waiting: "#F2C94C",
   running: "#58C4DD",
+  retrying: "#E7B86D",
   detailBorder: "#A8743F",
   detailText: "#F0CFAD"
 } as const;
+
+type DagDisplayStatus = "running" | "waiting" | "retrying" | "success" | "fail";
 
 function summarizeArgs(args: string): string {
   if (!args) {
@@ -236,11 +239,13 @@ interface TreeLine {
   branchPrefix: string;
   detailIndent: number;
   label: string;
-  status: "running" | "waiting" | "success" | "fail";
+  status: DagDisplayStatus;
   durationText: string;
   isCurrent: boolean;
   hasDetails: boolean;
   isExpanded: boolean;
+  retryCurrent?: number;
+  retryMax?: number;
   details: string[];
 }
 
@@ -267,12 +272,18 @@ function compareNodeId(a: string, b: string): number {
   return 0;
 }
 
-function statusIcon(status: "running" | "waiting" | "success" | "fail"): string {
+function statusIcon(status: DagDisplayStatus, retryCurrent?: number, retryMax?: number): string {
   if (status === "running") {
     return "◓";
   }
   if (status === "waiting") {
     return "⏸";
+  }
+  if (status === "retrying") {
+    if (typeof retryCurrent === "number" && typeof retryMax === "number") {
+      return `↻(${retryCurrent}/${retryMax})`;
+    }
+    return "↻";
   }
   if (status === "success") {
     return "✔";
@@ -376,12 +387,14 @@ function buildWeaveTreeLines(
     id: string;
     parentId?: string;
     label: string;
-    status: "running" | "waiting" | "success" | "fail";
+    status: DagDisplayStatus;
     startedAtMs: number;
     endedAtMs?: number;
     updatedAtMs: number;
     pausedAtMs?: number;
     pausedDurationMs: number;
+    retryCurrent?: number;
+    retryMax?: number;
     details: string[];
   }>,
   expandedNodeIds: Set<string>,
@@ -397,12 +410,14 @@ function buildWeaveTreeLines(
       id: string;
       parentId?: string;
       label: string;
-      status: "running" | "waiting" | "success" | "fail";
+      status: DagDisplayStatus;
       startedAtMs: number;
       endedAtMs?: number;
       updatedAtMs: number;
       pausedAtMs?: number;
       pausedDurationMs: number;
+      retryCurrent?: number;
+      retryMax?: number;
       details: string[];
     }>
   >();
@@ -425,12 +440,14 @@ function buildWeaveTreeLines(
       id: string;
       parentId?: string;
       label: string;
-      status: "running" | "waiting" | "success" | "fail";
+      status: DagDisplayStatus;
       startedAtMs: number;
       endedAtMs?: number;
       updatedAtMs: number;
       pausedAtMs?: number;
       pausedDurationMs: number;
+      retryCurrent?: number;
+      retryMax?: number;
       details: string[];
     }>,
     prefix: string,
@@ -471,6 +488,8 @@ function buildWeaveTreeLines(
         isCurrent: false,
         hasDetails,
         isExpanded,
+        retryCurrent: node.retryCurrent,
+        retryMax: node.retryMax,
         details: node.details
       });
 
@@ -485,7 +504,7 @@ function buildWeaveTreeLines(
   walk(roots, "", 0);
 
   const currentNode = [...nodes]
-    .filter((node) => node.status === "running" || node.status === "waiting")
+    .filter((node) => node.status === "running" || node.status === "waiting" || node.status === "retrying")
     .sort((a, b) => b.updatedAtMs - a.updatedAtMs)[0];
   if (currentNode) {
     const index = lines.findIndex((line) => line.id === currentNode.id);
@@ -1116,7 +1135,7 @@ export function App(props: AppProps): React.ReactElement {
               const foldPrefix = line.hasDetails ? (line.isExpanded ? "[-] " : "[+] ") : "";
               const nodeKind = line.id.includes(".") ? "工具" : "决策";
               const semanticLabel = line.id.includes(".") ? semanticToolTitle(line.label, line.details) : line.label;
-              const nodeText = `${line.branchPrefix}${foldPrefix}${statusIcon(line.status)} [${nodeKind}] ${line.id} ${semanticLabel}${line.durationText}`;
+              const nodeText = `${line.branchPrefix}${foldPrefix}${statusIcon(line.status, line.retryCurrent, line.retryMax)} [${nodeKind}] ${line.id} ${semanticLabel}${line.durationText}`;
               const prefix = selected ? "▸ " : "  ";
 
               return (
@@ -1129,6 +1148,8 @@ export function App(props: AppProps): React.ReactElement {
                           ? THEME.panelTitle
                           : line.status === "running"
                             ? THEME.running
+                            : line.status === "retrying"
+                              ? THEME.retrying
                             : line.status === "waiting"
                               ? THEME.waiting
                               : line.status === "success"

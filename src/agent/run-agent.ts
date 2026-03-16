@@ -852,7 +852,7 @@ export class AgentRuntime extends EventEmitter {
 
             this.emitDagNodeDetailEvent(runId, {
               nodeId: currentNodeId,
-              text: `retry=${attempt} reason=${this.summarizeForEvent(result.content)}${repairedArgs ? " | args=updated" : " | args=unchanged"}`
+              text: `retry=${attempt}/${payload.maxRetries} reason=${this.summarizeForEvent(result.content)}${repairedArgs ? " | args=updated" : " | args=unchanged"}`
             });
           }
         }

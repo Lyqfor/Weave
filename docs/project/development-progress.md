@@ -9,6 +9,42 @@
 
 ## 进度记录
 
+### 2026-03-16 - Entry 049 - 工具节点重试状态可视化（retrying + 计数图标）
+
+#### 范围
+为工具节点自动重试增加独立可视状态：重试触发时显示 `↻(x/y)`，最终成功/失败分别回落为 `✔/✖`。
+
+#### 改动
+- 重试明细增强：
+  - `src/agent/run-agent.ts`
+  - 重试 detail 从 `retry=x` 调整为 `retry=x/y`，便于 UI 直接解析重试进度。
+- TUI 状态树新增 retrying：
+  - `src/tui/use-agent-state.ts`
+  - `WeaveDagNodeItem.status` 扩展为 `running|waiting|retrying|success|fail`
+  - 新增 `retryCurrent/retryMax` 字段
+  - 监听 `weave.dag.detail` 时，识别 `retry=x/y` 并将节点切换为 `retrying`
+  - 节点进入 `success/fail` 时自动清理重试计数
+- DAG 渲染图标与配色增强：
+  - `src/tui/App.tsx`
+  - 新增 `retrying` 显示态与颜色
+  - 图标函数支持 `↻(x/y)` 计数输出
+  - 当前活动节点识别纳入 `retrying`，确保重试中节点持续高亮
+
+#### 影响文件
+- src/agent/run-agent.ts
+- src/tui/use-agent-state.ts
+- src/tui/App.tsx
+
+#### 验证
+- 构建通过：`corepack pnpm build`。
+- 全量回归通过：`corepack pnpm verify:p0`。
+
+#### 待解决问题
+- 当前重试状态来自 detail 文本解析（`retry=x/y`），后续可升级为显式结构化事件字段，降低文本协议耦合。
+
+#### 下一步
+- 可选增强：将重试次数、重试原因和参数修复结果升级为单独的 `weave.dag.retry` 协议事件。
+
 ### 2026-03-16 - Entry 048 - Weave 模式扩展：observe/auto 接线与重试策略分层
 
 #### 范围

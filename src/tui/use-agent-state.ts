@@ -35,12 +35,14 @@ export interface WeaveDagNodeItem {
   id: string;
   parentId?: string;
   label: string;
-  status: "running" | "waiting" | "success" | "fail";
+  status: "running" | "waiting" | "retrying" | "success" | "fail";
   startedAtMs: number;
   endedAtMs?: number;
   updatedAtMs: number;
   pausedAtMs?: number;
   pausedDurationMs: number;
+  retryCurrent?: number;
+  retryMax?: number;
   details: string[];
 }
 
@@ -205,6 +207,8 @@ export function useAgentState(gateway: AgentUiEventGateway): AgentUiState {
               endedAtMs: event.status === "success" || event.status === "fail" ? now : undefined,
               updatedAtMs: now,
               pausedDurationMs: 0,
+              retryCurrent: undefined,
+              retryMax: undefined,
               details: []
             }
           ];
@@ -236,7 +240,9 @@ export function useAgentState(gateway: AgentUiEventGateway): AgentUiState {
               : undefined,
           updatedAtMs: now,
           pausedAtMs: event.status === "success" || event.status === "fail" ? undefined : current.pausedAtMs,
-          pausedDurationMs: (current.pausedDurationMs ?? 0) + extraPausedMs
+          pausedDurationMs: (current.pausedDurationMs ?? 0) + extraPausedMs,
+          retryCurrent: event.status === "success" || event.status === "fail" ? undefined : current.retryCurrent,
+          retryMax: event.status === "success" || event.status === "fail" ? undefined : current.retryMax
         };
         return next;
       });
@@ -261,9 +267,16 @@ export function useAgentState(gateway: AgentUiEventGateway): AgentUiState {
         }
 
         const details = [...current.details, event.text].slice(-8);
+        const retryMatch = /^retry=(\d+)\/(\d+)\b/.exec(event.text.trim());
+        const retryCurrent = retryMatch ? Number(retryMatch[1]) : current.retryCurrent;
+        const retryMax = retryMatch ? Number(retryMatch[2]) : current.retryMax;
         next[index] = {
           ...current,
+          status: retryMatch ? "retrying" : current.status,
+          endedAtMs: retryMatch ? undefined : current.endedAtMs,
           details,
+          retryCurrent,
+          retryMax,
           updatedAtMs: Date.now()
         };
         return next;
