@@ -7,6 +7,13 @@ import { ToolRegistry } from "../tools/tool-registry.js";
 import type { ToolExecuteResult } from "../tools/tool-types.js";
 import { createRuntimeRunner, type RunnerMode } from "../runtime/runner-selector.js";
 import { DagExecutionGraph } from "../runtime/dag-graph.js";
+import { DagStateStore } from "../runtime/state-store.js";
+import {
+  createDagEventEnvelope,
+  type DagNodeDetailPayload,
+  type DagNodeTransitionPayload,
+  type DagSchedulerIssuePayload
+} from "../runtime/dag-event-contract.js";
 import type {
   AgentRunner,
   RunOnceStreamOptions,
@@ -39,6 +46,9 @@ export type AgentRunEventType =
 
 export interface AgentRunEvent {
   type: AgentRunEventType;
+  schemaVersion?: string;
+  eventId?: string;
+  eventType?: string;
   runId: string;
   timestamp: string;
   payload?: {
@@ -68,6 +78,7 @@ interface StepGateOptions {
 }
 
 export class AgentRuntime extends EventEmitter {
+  private static readonly AGENT_EVENT_SCHEMA_VERSION = "dagent.agent.event.v1";
   private readonly llmClient: QwenClient;
   private readonly memoryStore: MemoryStore;
   private readonly toolRegistry: ToolRegistry;
@@ -423,6 +434,8 @@ export class AgentRuntime extends EventEmitter {
       toolCallId: string;
       toolName: string;
       rawArgsText: string;
+      maxRetries: number;
+      timeoutMs: number;
     };
 
     type FinalNodePayload = {
@@ -430,8 +443,11 @@ export class AgentRuntime extends EventEmitter {
     };
 
     const maxSteps = 6;
+    const defaultToolRetries = Number(process.env.WEAVE_DAG_TOOL_RETRIES ?? "1");
+    const defaultToolTimeoutMs = Number(process.env.WEAVE_DAG_TOOL_TIMEOUT_MS ?? "15000");
     const modelTools = this.toolRegistry.listModelTools();
     const graph = new DagExecutionGraph();
+    const stateStore = new DagStateStore();
     const workingMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = this.historyMessages.map(
       (message) => ({
         role: message.role,
@@ -439,8 +455,21 @@ export class AgentRuntime extends EventEmitter {
       })
     );
     workingMessages.push({ role: "user", content: userInput });
+    stateStore.setRunValue("userInput", userInput);
 
     let finalText = "";
+
+    const transitionNode = (nodeId: string, toStatus: "ready" | "running" | "blocked" | "success" | "fail" | "skipped" | "aborted", reason?: string): void => {
+      const nodeBefore = graph.getNode(nodeId);
+      const transition = graph.transitionStatus(nodeId, toStatus, reason);
+      this.emitDagNodeTransitionEvent(runId, {
+        nodeId,
+        nodeType: nodeBefore.type,
+        fromStatus: transition.fromStatus,
+        toStatus: transition.toStatus,
+        reason: transition.reason
+      });
+    };
 
     const addLlmNode = (step: number, dependsOnNodeIds: string[] = []): string => {
       const nodeId = `llm-${step}`;
@@ -451,34 +480,51 @@ export class AgentRuntime extends EventEmitter {
         payload: { step }
       });
 
-      for (const depId of dependsOnNodeIds) {
+      for (let index = 0; index < dependsOnNodeIds.length; index += 1) {
+        const depId = dependsOnNodeIds[index];
         graph.addEdge(depId, nodeId);
+        graph.addDataEdge({
+          fromNodeId: depId,
+          toNodeId: nodeId,
+          fromKey: "content",
+          toKey: `tool_${index + 1}`
+        });
       }
 
       return nodeId;
     };
 
     addLlmNode(1);
+    graph.validateIntegrity();
 
     while (graph.hasPendingWork()) {
       const readyNodeIds = graph.getReadyNodeIds().sort();
       if (readyNodeIds.length === 0) {
+        const remainingNodeIds = graph.getInProgressNodeIds();
+        this.emitDagSchedulerIssueEvent(runId, "dag.scheduler.deadlock", {
+          message: "DAG 调度死锁：存在未完成节点但无可执行 ready 节点",
+          remainingNodeIds
+        });
         throw new Error("DAG 调度死锁：存在未完成节点但无可执行 ready 节点");
       }
 
       const currentNodeId = readyNodeIds[0];
       const node = graph.getNode(currentNodeId);
-      graph.setStatus(currentNodeId, "running");
+      transitionNode(currentNodeId, "running", "scheduler-picked-ready-node");
 
       if (node.type === "llm") {
         const step = (node.payload as { step: number }).step;
+        const dagInput = stateStore.resolveNodeInput(graph, currentNodeId);
+        stateStore.setRunValue(`${currentNodeId}.input`, dagInput);
+
         this.logger.info("run.dag.step", "DAG 调度执行 LLM 节点", {
           runId,
           step,
           nodeId: currentNodeId,
           sessionId: this.sessionId,
           turnIndex: this.turnIndex,
-          modelToolCount: modelTools.length
+          modelToolCount: modelTools.length,
+          dagInputKeys: Object.keys(dagInput)
         });
 
         let effectiveSystemPrompt = systemPrompt;
@@ -503,6 +549,15 @@ export class AgentRuntime extends EventEmitter {
           tools: modelTools
         });
 
+        stateStore.setNodeOutput(currentNodeId, {
+          ok: true,
+          content: assistantMessage.content ?? "",
+          metadata: {
+            toolCallCount: assistantMessage.tool_calls?.length ?? 0,
+            step
+          }
+        });
+
         for (const plugin of plugins) {
           const output = await plugin.afterLlmResponse?.({
             ...basePluginContext,
@@ -524,7 +579,14 @@ export class AgentRuntime extends EventEmitter {
             } satisfies FinalNodePayload
           });
           graph.addEdge(currentNodeId, finalNodeId);
-          graph.setStatus(currentNodeId, "success");
+          graph.addDataEdge({
+            fromNodeId: currentNodeId,
+            toNodeId: finalNodeId,
+            fromKey: "content",
+            toKey: "finalText"
+          });
+
+          transitionNode(currentNodeId, "success", "llm-final-answer");
           continue;
         }
 
@@ -546,10 +608,18 @@ export class AgentRuntime extends EventEmitter {
               step,
               toolCallId: toolCall.id,
               toolName: toolCall.function.name,
-              rawArgsText: toolCall.function.arguments || "{}"
+              rawArgsText: toolCall.function.arguments || "{}",
+              maxRetries: defaultToolRetries,
+              timeoutMs: defaultToolTimeoutMs
             } satisfies ToolNodePayload
           });
           graph.addEdge(currentNodeId, toolNodeId);
+          graph.addDataEdge({
+            fromNodeId: currentNodeId,
+            toNodeId: toolNodeId,
+            fromKey: "content",
+            toKey: "llmDecision"
+          });
           toolNodeIds.push(toolNodeId);
         }
 
@@ -567,16 +637,25 @@ export class AgentRuntime extends EventEmitter {
           });
           for (const toolNodeId of toolNodeIds) {
             graph.addEdge(toolNodeId, finalNodeId);
+            graph.addDataEdge({
+              fromNodeId: toolNodeId,
+              toNodeId: finalNodeId,
+              fromKey: "content",
+              toKey: toolNodeId
+            });
           }
         }
 
-        graph.setStatus(currentNodeId, "success");
+        graph.validateIntegrity();
+        transitionNode(currentNodeId, "success", "llm-scheduled-next-nodes");
         continue;
       }
 
       if (node.type === "tool") {
         const payload = node.payload as ToolNodePayload;
         const step = payload.step;
+        const dagInput = stateStore.resolveNodeInput(graph, currentNodeId);
+        stateStore.setRunValue(`${currentNodeId}.input`, dagInput);
 
         let parsedArgs: unknown = {};
         try {
@@ -589,7 +668,7 @@ export class AgentRuntime extends EventEmitter {
         let skipByApproval = false;
 
         if (stepGate.enabled && stepGate.approveToolCall) {
-          graph.setStatus(currentNodeId, "blocked");
+          transitionNode(currentNodeId, "blocked", "waiting-user-approval");
           this.emitRunEvent({
             type: "node.pending_approval",
             runId,
@@ -626,6 +705,7 @@ export class AgentRuntime extends EventEmitter {
                 approvalAction: "abort"
               }
             });
+            transitionNode(currentNodeId, "aborted", "approval-aborted");
             throw new Error("用户终止了当前回合执行");
           }
 
@@ -651,7 +731,21 @@ export class AgentRuntime extends EventEmitter {
               toolArgsJsonText: this.safeJsonStringify(effectiveArgs)
             }
           });
-          graph.setStatus(currentNodeId, "running");
+
+          if (skipByApproval) {
+            stateStore.setNodeOutput(currentNodeId, {
+              ok: false,
+              content: "[SKIPPED by approval gate]",
+              metadata: {
+                skippedByUser: true,
+                dagInput
+              }
+            });
+            transitionNode(currentNodeId, "skipped", "approval-skipped");
+            continue;
+          }
+
+          transitionNode(currentNodeId, "running", "approval-resumed");
         }
 
         this.emitRunEvent({
@@ -679,18 +773,35 @@ export class AgentRuntime extends EventEmitter {
           this.emitPluginOutput(runId, output);
         }
 
-        const result: ToolExecuteResult =
-          skipByApproval
-            ? {
-                ok: false,
-                content: "[SKIPPED by approval gate]",
-                metadata: { skippedByUser: true }
-              }
-            : await this.toolRegistry.execute(payload.toolName, effectiveArgs, {
-                sessionId: this.sessionId,
-                runId,
-                workspaceRoot: process.cwd()
-              });
+        let attempt = 0;
+        let result: ToolExecuteResult = {
+          ok: false,
+          content: "工具执行失败",
+          metadata: {}
+        };
+
+        while (attempt <= payload.maxRetries) {
+          attempt += 1;
+          result = await this.executeToolWithTimeout(
+            payload.toolName,
+            effectiveArgs,
+            payload.timeoutMs,
+            runId,
+            step,
+            payload.toolCallId
+          );
+
+          if (result.ok) {
+            break;
+          }
+
+          if (attempt <= payload.maxRetries) {
+            this.emitDagNodeDetailEvent(runId, {
+              nodeId: currentNodeId,
+              text: `retry=${attempt} reason=${this.summarizeForEvent(result.content)}`
+            });
+          }
+        }
 
         for (const plugin of plugins) {
           const output = await plugin.afterToolExecution?.({
@@ -719,25 +830,44 @@ export class AgentRuntime extends EventEmitter {
           }
         });
 
+        stateStore.setNodeOutput(currentNodeId, {
+          ok: result.ok,
+          content: result.content,
+          metadata: {
+            ...result.metadata,
+            attempt,
+            dagInput
+          }
+        });
+
         workingMessages.push({
           role: "tool",
           tool_call_id: payload.toolCallId,
           content: JSON.stringify({
             ok: result.ok,
             content: result.content,
-            metadata: result.metadata
+            metadata: {
+              ...result.metadata,
+              attempt,
+              dagInput
+            }
           })
         });
 
-        graph.setStatus(currentNodeId, result.ok ? "success" : "fail");
+        transitionNode(currentNodeId, result.ok ? "success" : "fail", result.ok ? "tool-ok" : "tool-failed");
         continue;
       }
 
       if (node.type === "final") {
         const payload = node.payload as FinalNodePayload;
-        finalText = payload.text;
+        const resolvedFinalInput = stateStore.resolveNodeInput(graph, currentNodeId);
+        finalText = payload.text || (typeof resolvedFinalInput.finalText === "string" ? resolvedFinalInput.finalText : "");
         await this.emitTextAsStream(runId, finalText);
-        graph.setStatus(currentNodeId, "success");
+        stateStore.setNodeOutput(currentNodeId, {
+          ok: true,
+          content: finalText
+        });
+        transitionNode(currentNodeId, "success", "final-emitted");
         return finalText;
       }
     }
@@ -1055,6 +1185,92 @@ export class AgentRuntime extends EventEmitter {
     }
   }
 
+  private async executeToolWithTimeout(
+    toolName: string,
+    args: unknown,
+    timeoutMs: number,
+    runId: string,
+    step: number,
+    toolCallId: string
+  ): Promise<ToolExecuteResult> {
+    try {
+      const result = await this.withTimeout(
+        this.toolRegistry.execute(toolName, args, {
+          sessionId: this.sessionId,
+          runId,
+          workspaceRoot: process.cwd()
+        }),
+        timeoutMs,
+        `工具执行超时: ${toolName} 超过 ${timeoutMs}ms`
+      );
+      return result;
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error("run.dag.tool.error", "DAG 工具执行失败", {
+        runId,
+        step,
+        toolName,
+        toolCallId,
+        errorMessage
+      });
+      return {
+        ok: false,
+        content: errorMessage,
+        metadata: {
+          timeoutMs,
+          timedOut: errorMessage.includes("超时")
+        }
+      };
+    }
+  }
+
+  private async withTimeout<TValue>(promise: Promise<TValue>, timeoutMs: number, timeoutMessage: string): Promise<TValue> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<TValue>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  private emitDagNodeTransitionEvent(runId: string, payload: DagNodeTransitionPayload): void {
+    const envelope = createDagEventEnvelope(runId, "dag.node.transition", payload);
+    this.emitPluginOutput(runId, {
+      pluginName: "weave",
+      outputType: "weave.dag.event",
+      outputText: this.safeJsonStringify(envelope)
+    });
+  }
+
+  private emitDagNodeDetailEvent(runId: string, payload: DagNodeDetailPayload): void {
+    const envelope = createDagEventEnvelope(runId, "dag.node.detail", payload);
+    this.emitPluginOutput(runId, {
+      pluginName: "weave",
+      outputType: "weave.dag.event",
+      outputText: this.safeJsonStringify(envelope)
+    });
+  }
+
+  private emitDagSchedulerIssueEvent(
+    runId: string,
+    eventType: "dag.scheduler.deadlock" | "dag.scheduler.integrity",
+    payload: DagSchedulerIssuePayload
+  ): void {
+    const envelope = createDagEventEnvelope(runId, eventType, payload);
+    this.emitPluginOutput(runId, {
+      pluginName: "weave",
+      outputType: "weave.dag.event",
+      outputText: this.safeJsonStringify(envelope)
+    });
+  }
+
   private shouldUseDagRunner(options?: RunOnceStreamOptions): boolean {
     if (!options?.plugins || options.plugins.length === 0) {
       return false;
@@ -1067,13 +1283,22 @@ export class AgentRuntime extends EventEmitter {
   private emitRunEvent(event: AgentRunEvent): void {
     // 统一在事件发布点做日志打标，保证链路可追踪。
     // delta 事件数量较大，避免刷屏，仅记录关键阶段事件。
-    if (event.type !== "llm.delta") {
+    const enrichedEvent: AgentRunEvent = {
+      ...event,
+      schemaVersion: event.schemaVersion ?? AgentRuntime.AGENT_EVENT_SCHEMA_VERSION,
+      eventType: event.eventType ?? event.type,
+      eventId: event.eventId ?? `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+    };
+
+    if (enrichedEvent.type !== "llm.delta") {
       this.logger.info("event.publish", "发布运行事件", {
-        runId: event.runId,
-        eventType: event.type
+        runId: enrichedEvent.runId,
+        eventType: enrichedEvent.type,
+        eventId: enrichedEvent.eventId,
+        schemaVersion: enrichedEvent.schemaVersion
       });
     }
-    this.emit("event", event);
+    this.emit("event", enrichedEvent);
   }
 
   private emitPluginOutput(runId: string, output: AgentPluginOutputs): void {

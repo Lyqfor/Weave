@@ -9,6 +9,86 @@
 
 ## 进度记录
 
+### 2026-03-16 - Entry 038 - TUI 事件分层优化：默认隐藏协议迁移节点
+
+#### 范围
+解决 Weave DAG 视图中“业务节点 + 协议迁移节点”双层混显导致的信息冗余问题。
+
+#### 改动
+- 优化 TUI 事件网关：
+  - `src/tui/agent-ui-events.ts`
+  - 对 `weave.dag.event` 的 `dag.node.transition` 事件默认不映射为 DAG 树节点。
+  - 新增调试开关：`WEAVE_TUI_SHOW_PROTOCOL_NODES=1` 时可恢复协议迁移节点显示。
+- 架构文档补充事件分层策略：
+  - `docs/project/architecture-and-files.md`
+
+#### 影响文件
+- src/tui/agent-ui-events.ts
+- docs/project/architecture-and-files.md
+
+#### 验证
+- 构建通过：`corepack pnpm build`。
+- P0 回归通过：`corepack pnpm verify:p0`。
+
+#### 待解决问题
+- 目前协议迁移事件仅用于调试显示开关，尚未形成独立“诊断面板”视图。
+
+#### 下一步
+- 增加可切换的调试面板，将协议事件与业务节点彻底分区展示。
+
+### 2026-03-16 - Entry 037 - 底层重构第 4 步：协议与状态总线 + DAG 语义测试矩阵
+
+#### 范围
+完成 DAG 事件契约与版本化策略，接入最小 StateStore 与数据边，并为节点状态迁移增加有限状态机约束；补齐 P0 语义测试矩阵。
+
+#### 改动
+- 新增 DAG 事件契约模块：
+  - `src/runtime/dag-event-contract.ts`
+  - 定义 `weave.dag.event.v1` 版本化信封（`schemaVersion/eventId/eventType`）
+- 新增最小状态总线：
+  - `src/runtime/state-store.ts`
+  - 统一管理运行上下文、节点输出、数据边输入解析
+- 升级 DAG 图模型：
+  - `src/runtime/dag-graph.ts`
+  - 增加数据边、图完整性校验、节点状态机合法迁移约束
+- 升级 DagRunner 执行链路：
+  - `src/agent/run-agent.ts`
+  - 接入 StateStore 与数据边映射
+  - 增加工具执行重试与超时控制（支持环境变量覆盖）
+  - 增加 `weave.dag.event` 协议事件输出
+  - 对所有 Runtime 事件补充统一 `schemaVersion/eventId`
+- TUI 网关兼容版本化 DAG 协议：
+  - `src/tui/agent-ui-events.ts` 支持解析 `weave.dag.event`
+- 新增 DAG 语义测试矩阵脚本：
+  - `scripts/verify-dag-matrix.mjs`
+  - 覆盖环路、死锁、依赖缺失、重试、超时、审批中断恢复、off/on/step 一致性
+- 更新脚本入口：
+  - `package.json` 新增 `verify:step-gate`、`verify:dag-matrix`、`verify:p0`
+
+#### 影响文件
+- src/runtime/dag-event-contract.ts
+- src/runtime/state-store.ts
+- src/runtime/dag-graph.ts
+- src/agent/run-agent.ts
+- src/tui/agent-ui-events.ts
+- scripts/verify-dag-matrix.mjs
+- package.json
+
+#### 验证
+- 构建通过：`corepack pnpm build`。
+- Step Gate 回归通过：`node scripts/verify-step-gate.mjs`。
+- DAG 语义矩阵通过：`node scripts/verify-dag-matrix.mjs`。
+
+#### 待解决问题
+- 目前状态总线为最小实现，尚未引入持久化快照与跨回合状态回放。
+- 目前并行/join/条件分支仍未实现，DAG 仍以串行 ready 节点优先策略执行。
+
+#### 下一步
+进入下一轮增强：
+- 增加条件节点与 join 节点语义；
+- 引入并行调度与冲突合并策略；
+- 增加 DAG 事件协议 schema 演进测试（向后兼容断言）。
+
 ### 2026-03-16 - Entry 036 - 底层重构第 3 步：DagRunner 最小骨架接入
 
 #### 范围

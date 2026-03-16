@@ -53,6 +53,13 @@ export interface WeaveDagDetailEvent {
   text: string;
 }
 
+interface WeaveDagEnvelope {
+  schemaVersion?: string;
+  eventId?: string;
+  eventType?: string;
+  payload?: Record<string, unknown>;
+}
+
 export interface ApprovalPendingEvent {
   runId: string;
   toolName: string;
@@ -67,6 +74,8 @@ export interface ApprovalResolvedEvent {
 }
 
 export class AgentUiEventGateway extends EventEmitter {
+  private readonly showProtocolTransitionNodes = process.env.WEAVE_TUI_SHOW_PROTOCOL_NODES === "1";
+
   mapFromRuntime(event: AgentRunEvent): void {
     if (event.type === "run.start") {
       this.emit("agent:start", {
@@ -171,7 +180,89 @@ export class AgentUiEventGateway extends EventEmitter {
         runId: event.runId,
         ...parsed
       } satisfies WeaveDagDetailEvent);
+      return;
     }
+
+    if (
+      event.type === "plugin.output" &&
+      event.payload?.pluginName === "weave" &&
+      event.payload?.outputType === "weave.dag.event"
+    ) {
+      const envelope = this.parseWeaveDagEnvelope(event.payload?.outputText ?? "");
+      if (!envelope) {
+        return;
+      }
+
+      if (envelope.eventType === "dag.node.transition") {
+        // 默认不把协议层状态迁移渲染为 DAG 业务节点，避免与 Weave 语义节点重复展示。
+        // 当需要诊断调度细节时，可通过 WEAVE_TUI_SHOW_PROTOCOL_NODES=1 临时打开。
+        if (!this.showProtocolTransitionNodes) {
+          return;
+        }
+
+        const nodeId = typeof envelope.payload?.nodeId === "string" ? envelope.payload.nodeId : "";
+        const nodeType = typeof envelope.payload?.nodeType === "string" ? envelope.payload.nodeType : "node";
+        const toStatus = typeof envelope.payload?.toStatus === "string" ? envelope.payload.toStatus : "";
+        const mappedStatus = this.mapDagNodeStatus(toStatus);
+        if (!nodeId || !mappedStatus) {
+          return;
+        }
+
+        this.emit("weave:dag", {
+          runId: event.runId,
+          nodeId,
+          label: `${nodeType} -> ${toStatus}`,
+          status: mappedStatus
+        } satisfies WeaveDagEvent);
+        return;
+      }
+
+      if (envelope.eventType === "dag.node.detail") {
+        const nodeId = typeof envelope.payload?.nodeId === "string" ? envelope.payload.nodeId : "";
+        const text = typeof envelope.payload?.text === "string" ? envelope.payload.text : "";
+        if (!nodeId || !text) {
+          return;
+        }
+
+        this.emit("weave:dag-detail", {
+          runId: event.runId,
+          nodeId,
+          text
+        } satisfies WeaveDagDetailEvent);
+      }
+    }
+  }
+
+  private parseWeaveDagEnvelope(text: string): WeaveDagEnvelope | null {
+    if (!text.trim()) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(text) as WeaveDagEnvelope;
+      if (!parsed.eventType || !parsed.payload) {
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  private mapDagNodeStatus(status: string): WeaveDagEvent["status"] | null {
+    if (status === "running" || status === "ready") {
+      return "running";
+    }
+    if (status === "blocked") {
+      return "waiting";
+    }
+    if (status === "success") {
+      return "success";
+    }
+    if (status === "fail" || status === "aborted" || status === "skipped") {
+      return "fail";
+    }
+    return null;
   }
 
   private parseWeaveDagNode(text: string): Omit<WeaveDagEvent, "runId"> | null {

@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "start": "node --enable-source-maps dist/index.js",
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "verify:step-gate": "node scripts/verify-step-gate.mjs",
+    "verify:dag-matrix": "node scripts/verify-dag-matrix.mjs",
+    "verify:p0": "pnpm build && pnpm verify:step-gate && pnpm verify:dag-matrix"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

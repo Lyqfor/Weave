@@ -193,7 +193,7 @@ export class WeavePlugin implements AgentLoopPlugin {
       }),
       this.buildDagDetail({
         nodeId: currentNode,
-        text: `final=${this.summarizeText(context.finalText)}`
+        text: `${this.summarizeText(context.finalText)}`
       })
     ];
   }

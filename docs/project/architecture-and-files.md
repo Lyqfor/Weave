@@ -77,7 +77,7 @@ dagent/
 
 ### 根目录文件
 - `package.json`
-  - 定义脚本（`dev`、`build`、`start`）与依赖。
+  - 定义脚本（`dev`、`build`、`start`、`verify:*`）与依赖。
 - `tsconfig.json`
   - 定义 TypeScript 编译目标与严格模式配置。
 - `.env.example`
@@ -147,7 +147,11 @@ dagent/
   - 运行器选择器：按模式选择执行内核。
   - 当前支持 `legacy` 与 `dag` 双运行器选择。
 - `src/runtime/dag-graph.ts`
-  - 最小 DAG 图模型：支持节点依赖、就绪判定与环路检测。
+  - DAG 图模型：支持节点依赖、数据边、就绪判定、环路检测与状态机迁移约束。
+- `src/runtime/state-store.ts`
+  - 最小状态总线：管理运行上下文、节点输出与数据边输入解析。
+- `src/runtime/dag-event-contract.ts`
+  - DAG 事件契约与版本化策略定义（`weave.dag.event.v1`）。
 - `src/index.ts`
   - CLI 入口，启动 Ink TUI 多轮会话（单次命令常驻）。
   - 显式初始化 `MemoryStore` 并注入 Agent Runtime。
@@ -159,7 +163,8 @@ dagent/
   - 对输入接收、事件消费、运行结果进行日志打标。
 - `src/tui/agent-ui-events.ts`
   - TUI 事件网关：将 Runtime 事件映射为 UI 语义事件（`agent:start`、`agent:thought`、`tool:start`、`tool:end`、`agent:finish`、`agent:error`）。
-  - 支持解析 Weave 结构化事件：`weave.dag.node` 与 `weave.dag.detail`。
+  - 支持解析 Weave 结构化事件：`weave.dag.node`、`weave.dag.detail`、`weave.dag.event`。
+  - 协议层与展示层解耦：默认不将 `weave.dag.event` 的状态迁移事件渲染为 DAG 树节点，避免重复信息；可通过 `WEAVE_TUI_SHOW_PROTOCOL_NODES=1` 打开调试显示。
 - `src/tui/use-agent-state.ts`
   - 顶层状态 Hook：监听 UI 事件并维护状态树（状态、思考文本、工具历史、当前工具、对话记录）。
   - 维护 Weave DAG 节点状态（父子关系、状态、时间戳、过程明细）。
@@ -189,6 +194,8 @@ dagent/
 - `src/weave/weave-plugin.ts`
   - 实现 Weave 观察者插件：监听 Agent 原生动作并输出实时 DAG 事件。
   - 输出双通道事件：`weave.dag.node`（节点状态）与 `weave.dag.detail`（节点过程明细）。
+- `scripts/verify-dag-matrix.mjs`
+  - DAG 语义测试矩阵脚本：覆盖环路、死锁、依赖缺失、重试、超时、审批中断恢复、一致性回归。
 - `src/weave/weave-dag-prompt.md`
   - Weave 历史提示词文档（当前观察者模式不再依赖运行时注入）。
 
