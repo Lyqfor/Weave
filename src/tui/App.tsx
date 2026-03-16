@@ -78,41 +78,105 @@ function ensureVisibleCursor(value: string): string {
   return `${value}█`;
 }
 
+function charDisplayWidth(char: string): number {
+  const code = char.codePointAt(0) ?? 0;
+  if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
+    return 0;
+  }
+
+  const isWide =
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe10 && code <= 0xfe19) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6);
+
+  return isWide ? 2 : 1;
+}
+
 function renderInputWithCursor(value: string, cursor: number, maxLength: number): string {
   const safeCursor = clamp(cursor, 0, value.length);
-  const withCursor = `${value.slice(0, safeCursor)}█${value.slice(safeCursor)}`;
+  const chars = Array.from(value);
+  const withCursorChars = [...chars.slice(0, safeCursor), "█", ...chars.slice(safeCursor)];
+  const totalWidth = withCursorChars.reduce((sum, char) => sum + charDisplayWidth(char), 0);
 
-  if (withCursor.length <= maxLength) {
-    return withCursor;
+  if (totalWidth <= maxLength) {
+    return withCursorChars.join("");
   }
 
-  const target = Math.max(0, safeCursor - Math.floor((maxLength - 1) / 2));
-  const maxStart = Math.max(0, withCursor.length - maxLength);
-  const start = clamp(target, 0, maxStart);
-  const end = Math.min(withCursor.length, start + maxLength);
-  const body = withCursor.slice(start, end);
-
-  if (start > 0 && end < withCursor.length) {
-    return `…${body.slice(1, -1)}…`;
+  const cursorIndex = safeCursor;
+  const prefixWidth = new Array<number>(withCursorChars.length + 1).fill(0);
+  for (let i = 0; i < withCursorChars.length; i += 1) {
+    prefixWidth[i + 1] = prefixWidth[i] + charDisplayWidth(withCursorChars[i]);
   }
 
-  if (start > 0) {
-    return `…${body.slice(1)}`;
+  const rangeWidth = (start: number, endExclusive: number): number => prefixWidth[endExclusive] - prefixWidth[start];
+  const buildDisplay = (left: number, rightExclusive: number): string => {
+    const hasLeft = left > 0;
+    const hasRight = rightExclusive < withCursorChars.length;
+    const body = withCursorChars.slice(left, rightExclusive).join("");
+    return `${hasLeft ? "…" : ""}${body}${hasRight ? "…" : ""}`;
+  };
+
+  let left = cursorIndex;
+  let rightExclusive = cursorIndex + 1;
+
+  const canUseRange = (nextLeft: number, nextRightExclusive: number): boolean => {
+    const hasLeft = nextLeft > 0;
+    const hasRight = nextRightExclusive < withCursorChars.length;
+    const ellipsisCost = (hasLeft ? 1 : 0) + (hasRight ? 1 : 0);
+    return rangeWidth(nextLeft, nextRightExclusive) + ellipsisCost <= maxLength;
+  };
+
+  while (true) {
+    let changed = false;
+
+    if (rightExclusive < withCursorChars.length && canUseRange(left, rightExclusive + 1)) {
+      rightExclusive += 1;
+      changed = true;
+    }
+
+    if (left > 0 && canUseRange(left - 1, rightExclusive)) {
+      left -= 1;
+      changed = true;
+    }
+
+    if (!changed) {
+      break;
+    }
   }
 
-  if (end < withCursor.length) {
-    return `${body.slice(0, -1)}…`;
-  }
-
-  return body;
+  return buildDisplay(left, rightExclusive);
 }
 
 function fitInputPreview(text: string, maxLength: number): string {
-  if (text.length <= maxLength) {
+  if (!text) {
     return text;
   }
 
-  return `…${text.slice(-(maxLength - 1))}`;
+  const chars = Array.from(text);
+  let width = 0;
+  const kept: string[] = [];
+
+  for (let i = chars.length - 1; i >= 0; i -= 1) {
+    const char = chars[i];
+    const next = charDisplayWidth(char);
+    if (width + next > Math.max(1, maxLength - 1)) {
+      break;
+    }
+
+    kept.push(char);
+    width += next;
+  }
+
+  if (kept.length === chars.length) {
+    return text;
+  }
+
+  return `…${kept.reverse().join("")}`;
 }
 
 function summarizeLine(text: string, maxLength = 72): string {
@@ -129,25 +193,8 @@ function clamp(n: number, min: number, max: number): number {
 }
 
 function estimateDisplayWidth(text: string): number {
-  // 终端宽度按“显示列”计数；CJK 字符通常占 2 列。
-  return Array.from(text).reduce((sum, char) => {
-    const code = char.codePointAt(0) ?? 0;
-    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
-      return sum;
-    }
-
-    const isWide =
-      (code >= 0x1100 && code <= 0x115f) ||
-      (code >= 0x2e80 && code <= 0xa4cf) ||
-      (code >= 0xac00 && code <= 0xd7a3) ||
-      (code >= 0xf900 && code <= 0xfaff) ||
-      (code >= 0xfe10 && code <= 0xfe19) ||
-      (code >= 0xfe30 && code <= 0xfe6f) ||
-      (code >= 0xff00 && code <= 0xff60) ||
-      (code >= 0xffe0 && code <= 0xffe6);
-
-    return sum + (isWide ? 2 : 1);
-  }, 0);
+  // 终端宽度按“显示列”计数；使用统一字符宽度函数，避免估算口径不一致。
+  return Array.from(text).reduce((sum, char) => sum + charDisplayWidth(char), 0);
 }
 
 function areSetsEqual(a: Set<string>, b: Set<string>): boolean {
