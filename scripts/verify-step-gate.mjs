@@ -167,6 +167,7 @@ function createRuntime(config, responder) {
 
   let callCount = 0;
   runtime.llmClient = {
+    chat: async () => "{}",
     chatWithTools: async (input) => {
       callCount += 1;
       const result = await responder(input, callCount);

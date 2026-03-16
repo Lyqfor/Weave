@@ -26,7 +26,7 @@ interface DagDetailEvent {
 
 interface ToolIntentSemantic {
   title: string;
-  detail: string;
+  details: string[];
 }
 
 export class WeavePlugin implements AgentLoopPlugin {
@@ -133,10 +133,12 @@ export class WeavePlugin implements AgentLoopPlugin {
         label: semantic.title,
         status: "running"
       }),
-      this.buildDagDetail({
-        nodeId: label,
-        text: semantic.detail
-      })
+      ...semantic.details.map((detail) =>
+        this.buildDagDetail({
+          nodeId: label,
+          text: detail
+        })
+      )
     ];
   }
 
@@ -255,12 +257,23 @@ export class WeavePlugin implements AgentLoopPlugin {
 
   private formatToolIntent(toolName: string, args?: unknown): ToolIntentSemantic {
     const argObj = (args && typeof args === "object" ? (args as Record<string, unknown>) : {}) ?? {};
+    const intentSummary = this.summarizeText(argObj.__intentSummary ?? "");
+    const toolGoal = this.summarizeText(argObj.__toolGoal ?? "");
+
+    const details: string[] = [];
+    if (intentSummary) {
+      details.push(`intent=${intentSummary}`);
+    }
+    if (toolGoal) {
+      details.push(`goal=${toolGoal}`);
+    }
 
     if (toolName === "command_exec") {
       const command = this.summarizeText(argObj.command ?? "");
+      details.push(command ? `command=${command}` : "command=");
       return {
         title: "执行命令",
-        detail: command ? `command=${command}` : "command="
+        details
       };
     }
 
@@ -269,23 +282,26 @@ export class WeavePlugin implements AgentLoopPlugin {
       const startLine = this.summarizeText(argObj.startLine ?? "");
       const endLine = this.summarizeText(argObj.endLine ?? "");
       const span = startLine || endLine ? ` lines=${startLine || "?"}-${endLine || "?"}` : "";
+      details.push(`file=${filePath || "(unknown)"}${span}`);
       return {
         title: "读取文件",
-        detail: `file=${filePath || "(unknown)"}${span}`
+        details
       };
     }
 
     if (toolName === "write_file") {
       const filePath = this.summarizeText(argObj.filePath ?? argObj.path ?? "");
+      details.push(`file=${filePath || "(unknown)"}`);
       return {
         title: "写入文件",
-        detail: `file=${filePath || "(unknown)"}`
+        details
       };
     }
 
+    details.push(`args=${this.summarizeText(args)}`);
     return {
       title: `执行 ${toolName}`,
-      detail: `args=${this.summarizeText(args)}`
+      details
     };
   }
 }

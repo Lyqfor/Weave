@@ -9,6 +9,49 @@
 
 ## 进度记录
 
+### 2026-03-16 - Entry 047 - 意图驱动工具调用与轻量重试链路落地
+
+#### 范围
+按阶段实现 LLM 单次调用复用、工具调用意图输出、工具失败轻量重试（最小上下文）与 TUI 节点意图展示。
+
+#### 改动
+- 抽取可复用 LLM 调用逻辑（执行层复用）：
+  - `src/agent/run-agent.ts`
+  - 新增统一方法：`invokeLlmWithTools`、`invokeLlmText`
+  - DAG 主链路与 legacy 主链路统一改为调用该复用层
+- 增加工具意图契约（节点级任务语义）：
+  - `src/agent/run-agent.ts`
+  - 在 LLM 生成 tool_call 后派生 `intentSummary/toolGoal`
+  - 通过运行时元字段注入工具参数（仅展示与重试使用，执行前剥离）
+- 增加工具失败轻量重试（最小上下文）：
+  - `src/agent/run-agent.ts`
+  - 重试上下文仅包含：`intent + previousArgs + lastResult`
+  - 多次重试仅保留最近一次失败结果，避免 token 线性膨胀
+  - 新增参数修复链路：`repairToolArgsByIntent`
+- Weave 工具节点展示意图：
+  - `src/weave/weave-plugin.ts`
+  - 工具节点 detail 增加 `intent=` 与 `goal=` 行
+- 验证脚本兼容更新：
+  - `scripts/verify-step-gate.mjs`
+  - `scripts/verify-dag-matrix.mjs`
+  - mock 增加 `chat` 方法，兼容新复用调用层
+
+#### 影响文件
+- src/agent/run-agent.ts
+- src/weave/weave-plugin.ts
+- scripts/verify-step-gate.mjs
+- scripts/verify-dag-matrix.mjs
+
+#### 验证
+- 构建通过：`corepack pnpm build`。
+- 全量回归通过：`corepack pnpm verify:p0`。
+
+#### 待解决问题
+- 当前意图派生优先基于 assistant 文本与参数摘要，尚未引入独立强约束 schema 的意图输出。
+
+#### 下一步
+- 可选增强：为 tool intent 增加 JSON schema 校验与缺省意图重建策略。
+
 ### 2026-03-16 - Entry 046 - 执行节点显示收敛：当前节点强制可见并展开
 
 #### 范围

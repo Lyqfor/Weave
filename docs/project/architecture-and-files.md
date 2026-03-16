@@ -127,6 +127,8 @@ dagent/
   - 内置双执行路径：Legacy loop 与最小 DagRunner。
   - 在 `weave=off` 时走 legacy；`weave=on/step` 时走 DagRunner。
   - DagRunner 以节点/依赖图驱动执行，保留现有插件钩子与 Step Gate 事件。
+  - 新增 LLM 调用复用层（`invokeLlmWithTools` / `invokeLlmText`），供主链路与工具重试共享。
+  - 新增工具意图派生（intent/goal）与轻量重试机制：失败重试仅携带意图、上次参数、最近一次结果。
   - 在流式调用过程中发布 `run.start`、`llm.request`、`llm.delta`、`llm.completed`、`run.completed`、`run.error` 事件。
   - 新增工具事件：`tool.execution.start`、`tool.execution.end`。
   - 新增 Step Gate 事件：`node.pending_approval`、`node.approval.resolved`。
@@ -196,6 +198,7 @@ dagent/
 - `src/weave/weave-plugin.ts`
   - 实现 Weave 观察者插件：监听 Agent 原生动作并输出实时 DAG 事件。
   - 输出双通道事件：`weave.dag.node`（节点状态）与 `weave.dag.detail`（节点过程明细）。
+  - 工具节点明细支持展示意图（intent）与目标（goal），提升节点可解释性。
 - `scripts/verify-dag-matrix.mjs`
   - DAG 语义测试矩阵脚本：覆盖环路、死锁、依赖缺失、重试、超时、审批中断恢复、一致性回归。
 - `src/weave/weave-dag-prompt.md`

@@ -77,6 +77,18 @@ interface StepGateOptions {
   approveToolCall?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
 }
 
+interface ToolIntentInfo {
+  summary: string;
+  goal: string;
+}
+
+interface ToolRetryTicket {
+  toolName: string;
+  intentSummary: string;
+  previousArgs: unknown;
+  lastResult: string;
+}
+
 export class AgentRuntime extends EventEmitter {
   private static readonly AGENT_EVENT_SCHEMA_VERSION = "dagent.agent.event.v1";
   private readonly llmClient: QwenClient;
@@ -433,6 +445,8 @@ export class AgentRuntime extends EventEmitter {
       step: number;
       toolCallId: string;
       toolName: string;
+      intentSummary: string;
+      toolGoal: string;
       rawArgsText: string;
       maxRetries: number;
       timeoutMs: number;
@@ -543,7 +557,7 @@ export class AgentRuntime extends EventEmitter {
           this.emitPluginOutput(runId, changed?.output);
         }
 
-        const assistantMessage = await this.llmClient.chatWithTools({
+        const assistantMessage = await this.invokeLlmWithTools({
           systemPrompt: effectiveSystemPrompt,
           messages: workingMessages,
           tools: modelTools
@@ -599,6 +613,13 @@ export class AgentRuntime extends EventEmitter {
         const toolNodeIds: string[] = [];
         for (let index = 0; index < toolCalls.length; index += 1) {
           const toolCall = toolCalls[index];
+          const parsedToolArgs = this.tryParseJson(toolCall.function.arguments || "{}");
+          const intent = this.deriveToolIntentFromAssistant(
+            assistantMessage.content,
+            toolCall.function.name,
+            parsedToolArgs,
+            userInput
+          );
           const toolNodeId = `tool-${step}-${index + 1}`;
           graph.addNode({
             id: toolNodeId,
@@ -608,7 +629,9 @@ export class AgentRuntime extends EventEmitter {
               step,
               toolCallId: toolCall.id,
               toolName: toolCall.function.name,
-              rawArgsText: toolCall.function.arguments || "{}",
+              intentSummary: intent.summary,
+              toolGoal: intent.goal,
+              rawArgsText: this.safeJsonStringify(this.attachIntentToToolArgs(parsedToolArgs, intent)),
               maxRetries: defaultToolRetries,
               timeoutMs: defaultToolTimeoutMs
             } satisfies ToolNodePayload
@@ -657,15 +680,26 @@ export class AgentRuntime extends EventEmitter {
         const dagInput = stateStore.resolveNodeInput(graph, currentNodeId);
         stateStore.setRunValue(`${currentNodeId}.input`, dagInput);
 
-        let parsedArgs: unknown = {};
-        try {
-          parsedArgs = JSON.parse(payload.rawArgsText || "{}");
-        } catch {
-          parsedArgs = {};
-        }
+        const parsedArgs = this.tryParseJson(payload.rawArgsText || "{}");
+        const runtimeMeta = this.extractRuntimeToolMeta(parsedArgs);
+        const intentSummary = runtimeMeta.intentSummary || payload.intentSummary;
+        const toolGoal = runtimeMeta.toolGoal || payload.toolGoal;
 
         let effectiveArgs = parsedArgs;
         let skipByApproval = false;
+
+        if (intentSummary) {
+          this.emitDagNodeDetailEvent(runId, {
+            nodeId: currentNodeId,
+            text: `intent=${intentSummary}`
+          });
+        }
+        if (toolGoal) {
+          this.emitDagNodeDetailEvent(runId, {
+            nodeId: currentNodeId,
+            text: `goal=${toolGoal}`
+          });
+        }
 
         if (stepGate.enabled && stepGate.approveToolCall) {
           transitionNode(currentNodeId, "blocked", "waiting-user-approval");
@@ -710,7 +744,10 @@ export class AgentRuntime extends EventEmitter {
           }
 
           if (decision.action === "edit" && decision.editedArgs !== undefined) {
-            effectiveArgs = decision.editedArgs;
+            effectiveArgs =
+              decision.editedArgs && typeof decision.editedArgs === "object"
+                ? (decision.editedArgs as Record<string, unknown>)
+                : {};
           }
 
           if (decision.action === "skip") {
@@ -796,9 +833,23 @@ export class AgentRuntime extends EventEmitter {
           }
 
           if (attempt <= payload.maxRetries) {
+            const repairTicket: ToolRetryTicket = {
+              toolName: payload.toolName,
+              intentSummary,
+              previousArgs: this.stripRuntimeToolMeta(effectiveArgs),
+              lastResult: this.summarizeForEvent(result.content, 300)
+            };
+            const repairedArgs = await this.repairToolArgsByIntent(repairTicket, this.memoryStore.buildSystemPrompt(this.llmConfig.systemPrompt));
+            if (repairedArgs) {
+              effectiveArgs = this.attachIntentToToolArgs(repairedArgs, {
+                summary: intentSummary,
+                goal: toolGoal
+              });
+            }
+
             this.emitDagNodeDetailEvent(runId, {
               nodeId: currentNodeId,
-              text: `retry=${attempt} reason=${this.summarizeForEvent(result.content)}`
+              text: `retry=${attempt} reason=${this.summarizeForEvent(result.content)}${repairedArgs ? " | args=updated" : " | args=unchanged"}`
             });
           }
         }
@@ -928,7 +979,7 @@ export class AgentRuntime extends EventEmitter {
       }
 
       // 调用模型获取回复，包含文本和工具调用指令。
-      const assistantMessage = await this.llmClient.chatWithTools({
+      const assistantMessage = await this.invokeLlmWithTools({
         systemPrompt: effectiveSystemPrompt,
         messages: workingMessages,
         tools: modelTools
@@ -963,13 +1014,17 @@ export class AgentRuntime extends EventEmitter {
       // 逐个执行工具；工具结果回填给模型继续推理。
       for (const toolCall of toolCalls) {
         const toolName = toolCall.function.name;
+        const toolIntent = this.deriveToolIntentFromAssistant(
+          assistantMessage.content,
+          toolName,
+          this.tryParseJson(toolCall.function.arguments || "{}"),
+          userInput
+        );
 
-        let parsedArgs: unknown = {};
-        try {
-          parsedArgs = JSON.parse(toolCall.function.arguments || "{}");
-        } catch {
-          parsedArgs = {};
-        }
+        const parsedArgs: unknown = this.attachIntentToToolArgs(
+          this.tryParseJson(toolCall.function.arguments || "{}"),
+          toolIntent
+        );
 
         let effectiveArgs = parsedArgs;
         let skipByApproval = false;
@@ -1014,7 +1069,10 @@ export class AgentRuntime extends EventEmitter {
           }
 
           if (decision.action === "edit" && decision.editedArgs !== undefined) {
-            effectiveArgs = decision.editedArgs;
+            effectiveArgs =
+              decision.editedArgs && typeof decision.editedArgs === "object"
+                ? (decision.editedArgs as Record<string, unknown>)
+                : {};
           }
 
           if (decision.action === "skip") {
@@ -1062,18 +1120,48 @@ export class AgentRuntime extends EventEmitter {
           this.emitPluginOutput(runId, output);
         }
 
-        const result: ToolExecuteResult =
+        const maxRetries = Number(process.env.WEAVE_DAG_TOOL_RETRIES ?? "1");
+        let result: ToolExecuteResult =
           skipByApproval
             ? {
                 ok: false,
                 content: "[SKIPPED by approval gate]",
                 metadata: { skippedByUser: true }
               }
-            : await this.toolRegistry.execute(toolName, effectiveArgs, {
-                sessionId: this.sessionId,
-                runId,
-                workspaceRoot: process.cwd()
-              });
+            : {
+                ok: false,
+                content: "工具执行失败",
+                metadata: {}
+              };
+
+        if (!skipByApproval) {
+          let attempt = 0;
+          while (attempt <= maxRetries) {
+            attempt += 1;
+            result = await this.toolRegistry.execute(toolName, this.stripRuntimeToolMeta(effectiveArgs), {
+              sessionId: this.sessionId,
+              runId,
+              workspaceRoot: process.cwd()
+            });
+
+            if (result.ok || attempt > maxRetries) {
+              break;
+            }
+
+            const repairedArgs = await this.repairToolArgsByIntent(
+              {
+                toolName,
+                intentSummary: toolIntent.summary,
+                previousArgs: this.stripRuntimeToolMeta(effectiveArgs),
+                lastResult: this.summarizeForEvent(result.content, 300)
+              },
+              systemPrompt
+            );
+            if (repairedArgs) {
+              effectiveArgs = this.attachIntentToToolArgs(repairedArgs, toolIntent);
+            }
+          }
+        }
 
         for (const plugin of plugins) {
           const output = await plugin.afterToolExecution?.({
@@ -1185,6 +1273,122 @@ export class AgentRuntime extends EventEmitter {
     }
   }
 
+  private async invokeLlmWithTools(input: {
+    systemPrompt: string;
+    messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+    tools: OpenAI.Chat.Completions.ChatCompletionTool[];
+  }): Promise<OpenAI.Chat.Completions.ChatCompletionMessage> {
+    return await this.llmClient.chatWithTools(input);
+  }
+
+  private async invokeLlmText(input: {
+    systemPrompt: string;
+    userMessage: string;
+  }): Promise<string> {
+    return await this.llmClient.chat({
+      systemPrompt: input.systemPrompt,
+      userMessage: input.userMessage,
+      historyMessages: []
+    });
+  }
+
+  private tryParseJson(text: string): Record<string, unknown> {
+    try {
+      const parsed = JSON.parse(text || "{}");
+      if (parsed && typeof parsed === "object") {
+        return parsed as Record<string, unknown>;
+      }
+      return {};
+    } catch {
+      return {};
+    }
+  }
+
+  private deriveToolIntentFromAssistant(
+    assistantContent: string | null | undefined,
+    toolName: string,
+    toolArgs: unknown,
+    userInput: string
+  ): ToolIntentInfo {
+    const normalized = this.summarizeForEvent(assistantContent ?? "", 180);
+    const fallbackSummary = `为完成请求调用 ${toolName}`;
+    const argSummary = this.summarizeForEvent(toolArgs, 120);
+
+    return {
+      summary: normalized || fallbackSummary,
+      goal: argSummary ? `使用 ${toolName} 执行参数 ${argSummary}` : `使用 ${toolName} 完成与“${this.summarizeForEvent(userInput, 60)}”相关步骤`
+    };
+  }
+
+  private attachIntentToToolArgs(args: unknown, intent: ToolIntentInfo): Record<string, unknown> {
+    const argObj = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+    return {
+      ...argObj,
+      __intentSummary: intent.summary,
+      __toolGoal: intent.goal
+    };
+  }
+
+  private extractRuntimeToolMeta(args: unknown): { intentSummary: string; toolGoal: string } {
+    const argObj = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+    return {
+      intentSummary: typeof argObj.__intentSummary === "string" ? argObj.__intentSummary : "",
+      toolGoal: typeof argObj.__toolGoal === "string" ? argObj.__toolGoal : ""
+    };
+  }
+
+  private stripRuntimeToolMeta(args: unknown): Record<string, unknown> {
+    const argObj = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+    const { __intentSummary, __toolGoal, ...rest } = argObj;
+    return rest;
+  }
+
+  private async repairToolArgsByIntent(ticket: ToolRetryTicket, systemPrompt: string): Promise<Record<string, unknown> | null> {
+    const repairPrompt = [
+      "你是工具参数修复器。请根据失败信息修复参数，并且仅返回 JSON 对象，不要输出任何解释。",
+      `toolName=${ticket.toolName}`,
+      `intent=${ticket.intentSummary}`,
+      `previousArgs=${this.safeJsonStringify(ticket.previousArgs)}`,
+      `lastResult=${ticket.lastResult}`,
+      "要求：尽量最小修改参数；若无法修复则原样返回 previousArgs。"
+    ].join("\n");
+
+    const raw = await this.invokeLlmText({
+      systemPrompt,
+      userMessage: repairPrompt
+    });
+
+    const parsed = this.extractJsonObject(raw);
+    return parsed;
+  }
+
+  private extractJsonObject(text: string): Record<string, unknown> | null {
+    const trimmed = text.trim();
+    const direct = this.tryParseJson(trimmed);
+    if (Object.keys(direct).length > 0 || trimmed === "{}") {
+      return direct;
+    }
+
+    const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenceMatch?.[1]) {
+      const fenced = this.tryParseJson(fenceMatch[1]);
+      if (Object.keys(fenced).length > 0 || fenceMatch[1].trim() === "{}") {
+        return fenced;
+      }
+    }
+
+    const firstBrace = trimmed.indexOf("{");
+    const lastBrace = trimmed.lastIndexOf("}");
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      const sliced = this.tryParseJson(trimmed.slice(firstBrace, lastBrace + 1));
+      if (Object.keys(sliced).length > 0) {
+        return sliced;
+      }
+    }
+
+    return null;
+  }
+
   private async executeToolWithTimeout(
     toolName: string,
     args: unknown,
@@ -1195,7 +1399,7 @@ export class AgentRuntime extends EventEmitter {
   ): Promise<ToolExecuteResult> {
     try {
       const result = await this.withTimeout(
-        this.toolRegistry.execute(toolName, args, {
+        this.toolRegistry.execute(toolName, this.stripRuntimeToolMeta(args), {
           sessionId: this.sessionId,
           runId,
           workspaceRoot: process.cwd()
