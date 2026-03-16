@@ -9,6 +9,41 @@
 
 ## 进度记录
 
+### 2026-03-16 - Entry 051 - 重试全透明化：尝试节点/修复节点/重试生命周期事件
+
+#### 范围
+按“无黑盒”目标实现工具重试过程全透明：每次失败、局部修复、自动重试都以 DAG 子节点形式输出。
+
+#### 改动
+- 执行层暴露重试生命周期事件：
+  - `src/agent/run-agent.ts`
+  - 新增运行事件类型：`tool.retry.start`、`tool.retry.end`
+  - 事件携带 `retryAttempt/retryMax/retryReason/retryPrepared` 等字段
+- Weave DAG 子节点渲染数据源落地：
+  - `src/agent/run-agent.ts`
+  - 在工具节点下新增“尝试子节点”与“修复子节点”输出：
+    - 尝试节点：`${toolNode}.1 / .3 / .5 ...`（running -> success/fail）
+    - 修复节点：`${toolNode}.2 / .4 / .6 ...`（局部修复参数）
+  - 每次尝试输出耗时与结果摘要；失败后输出失败原因；修复节点输出 `args=updated|unchanged`
+  - 保留主工具节点最终态（`✔/✖`）不变，同时通过子节点完整展示重试链路
+- Weave 事件发射能力增强：
+  - `src/agent/run-agent.ts`
+  - 新增直接发射 `weave.dag.node` / `weave.dag.detail` 的内部 helper，避免仅依赖协议层 detail 文本
+
+#### 影响文件
+- src/agent/run-agent.ts
+
+#### 验证
+- 构建通过：`corepack pnpm build`。
+- 全量回归通过：`corepack pnpm verify:p0`。
+- 预期可视化：工具失败后，主节点下可见失败尝试节点、修复节点与后续重试节点，不再是黑盒重试。
+
+#### 待解决问题
+- 目前重试子节点 ID 采用顺序编号策略，后续可升级为显式类型后缀（attempt/repair）并在 UI 侧提供更强语义渲染。
+
+#### 下一步
+- 可选增强：将 attempt/repair 子节点抽象为统一 "execution phase" 协议，复用到超时降级、fallback 工具链与人工接管节点。
+
 ### 2026-03-16 - Entry 050 - 重试标识未显示修复（DAG 事件节点 ID 对齐）
 
 #### 范围

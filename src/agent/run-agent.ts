@@ -39,6 +39,8 @@ export type AgentRunEventType =
   | "node.pending_approval"
   | "node.approval.resolved"
   | "tool.execution.start"
+  | "tool.retry.start"
+  | "tool.retry.end"
   | "tool.execution.end"
   | "plugin.output"
   | "run.completed"
@@ -65,6 +67,10 @@ export interface AgentRunEvent {
     toolArgsJsonText?: string;
     toolResultText?: string;
     toolStatus?: "success" | "fail";
+    retryAttempt?: number;
+    retryMax?: number;
+    retryReason?: string;
+    retryPrepared?: boolean;
     approvalAction?: "approve" | "edit" | "skip" | "abort";
     pluginName?: string;
     outputType?: string;
@@ -818,6 +824,7 @@ export class AgentRuntime extends EventEmitter {
         }
 
         let attempt = 0;
+        const totalAttempts = payload.maxRetries + 1;
         let result: ToolExecuteResult = {
           ok: false,
           content: "工具执行失败",
@@ -826,6 +833,20 @@ export class AgentRuntime extends EventEmitter {
 
         while (attempt <= payload.maxRetries) {
           attempt += 1;
+          const attemptNodeId = `${detailNodeId}.${attempt * 2 - 1}`;
+          const attemptLabel = attempt === 1 ? `工具执行尝试 #${attempt}` : `自动重试执行 #${attempt}`;
+          this.emitWeaveDagNodeEvent(runId, {
+            nodeId: attemptNodeId,
+            parentId: detailNodeId,
+            label: attemptLabel,
+            status: "running"
+          });
+          this.emitWeaveDagDetailEvent(runId, {
+            nodeId: attemptNodeId,
+            text: `attempt=${attempt}/${totalAttempts}`
+          });
+
+          const attemptStartedAt = Date.now();
           result = await this.executeToolWithTimeout(
             payload.toolName,
             effectiveArgs,
@@ -834,12 +855,56 @@ export class AgentRuntime extends EventEmitter {
             step,
             payload.toolCallId
           );
+          const attemptElapsedMs = Math.max(0, Date.now() - attemptStartedAt);
 
           if (result.ok) {
+            this.emitWeaveDagNodeEvent(runId, {
+              nodeId: attemptNodeId,
+              parentId: detailNodeId,
+              label: attemptLabel,
+              status: "success"
+            });
+            this.emitWeaveDagDetailEvent(runId, {
+              nodeId: attemptNodeId,
+              text: `ok elapsed=${attemptElapsedMs}ms result=${this.summarizeForEvent(result.content)}`
+            });
             break;
           }
 
+          this.emitWeaveDagNodeEvent(runId, {
+            nodeId: attemptNodeId,
+            parentId: detailNodeId,
+            label: attemptLabel,
+            status: "fail"
+          });
+          this.emitWeaveDagDetailEvent(runId, {
+            nodeId: attemptNodeId,
+            text: `fail elapsed=${attemptElapsedMs}ms reason=${this.summarizeForEvent(result.content)}`
+          });
+
           if (attempt <= payload.maxRetries) {
+            this.emitRunEvent({
+              type: "tool.retry.start",
+              runId,
+              timestamp: new Date().toISOString(),
+              payload: {
+                sessionId: this.sessionId,
+                turnIndex: this.turnIndex,
+                toolName: payload.toolName,
+                toolCallId: payload.toolCallId,
+                retryAttempt: attempt,
+                retryMax: payload.maxRetries,
+                retryReason: this.summarizeForEvent(result.content)
+              }
+            });
+
+            const repairNodeId = `${detailNodeId}.${attempt * 2}`;
+            this.emitWeaveDagNodeEvent(runId, {
+              nodeId: repairNodeId,
+              parentId: detailNodeId,
+              label: `局部修复参数 #${attempt}`,
+              status: "running"
+            });
             const repairTicket: ToolRetryTicket = {
               toolName: payload.toolName,
               intentSummary,
@@ -854,11 +919,55 @@ export class AgentRuntime extends EventEmitter {
               });
             }
 
+            this.emitWeaveDagNodeEvent(runId, {
+              nodeId: repairNodeId,
+              parentId: detailNodeId,
+              label: `局部修复参数 #${attempt}`,
+              status: "success"
+            });
+            this.emitWeaveDagDetailEvent(runId, {
+              nodeId: repairNodeId,
+              text: `${repairedArgs ? "args=updated" : "args=unchanged"} last_error=${this.summarizeForEvent(result.content)}`
+            });
+
+            this.emitRunEvent({
+              type: "tool.retry.end",
+              runId,
+              timestamp: new Date().toISOString(),
+              payload: {
+                sessionId: this.sessionId,
+                turnIndex: this.turnIndex,
+                toolName: payload.toolName,
+                toolCallId: payload.toolCallId,
+                retryAttempt: attempt,
+                retryMax: payload.maxRetries,
+                retryPrepared: repairedArgs !== null
+              }
+            });
+
             this.emitDagNodeDetailEvent(runId, {
               nodeId: detailNodeId,
               text: `retry=${attempt}/${payload.maxRetries} reason=${this.summarizeForEvent(result.content)}${repairedArgs ? " | args=updated" : " | args=unchanged"}`
             });
           }
+        }
+
+        if (!result.ok && payload.maxRetries > 0) {
+          this.emitRunEvent({
+            type: "tool.retry.end",
+            runId,
+            timestamp: new Date().toISOString(),
+            payload: {
+              sessionId: this.sessionId,
+              turnIndex: this.turnIndex,
+              toolName: payload.toolName,
+              toolCallId: payload.toolCallId,
+              retryAttempt: attempt,
+              retryMax: payload.maxRetries,
+              retryPrepared: false,
+              retryReason: "重试次数已耗尽"
+            }
+          });
         }
 
         for (const plugin of plugins) {
@@ -1457,6 +1566,25 @@ export class AgentRuntime extends EventEmitter {
       pluginName: "weave",
       outputType: "weave.dag.event",
       outputText: this.safeJsonStringify(envelope)
+    });
+  }
+
+  private emitWeaveDagNodeEvent(
+    runId: string,
+    payload: { nodeId: string; parentId?: string; label: string; status: "running" | "waiting" | "success" | "fail" }
+  ): void {
+    this.emitPluginOutput(runId, {
+      pluginName: "weave",
+      outputType: "weave.dag.node",
+      outputText: this.safeJsonStringify(payload)
+    });
+  }
+
+  private emitWeaveDagDetailEvent(runId: string, payload: { nodeId: string; text: string }): void {
+    this.emitPluginOutput(runId, {
+      pluginName: "weave",
+      outputType: "weave.dag.detail",
+      outputText: this.safeJsonStringify(payload)
     });
   }
 

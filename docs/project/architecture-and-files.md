@@ -131,6 +131,8 @@ dagent/
   - 新增工具意图派生（intent/goal）与轻量重试机制：失败重试仅携带意图、上次参数、最近一次结果。
   - 新增 `autoMode` 运行参数：仅在 auto 模式开启失败自动修复重试；observe 模式默认不自动重试。
   - DAG 工具节点增加 `displayNodeId(step.index)`，用于将 `intent/goal/retry` detail 事件稳定映射到 TUI 可见节点（如 `1.1`）。
+  - 重试过程透明化：在工具节点下输出“尝试子节点 + 修复子节点”，完整呈现失败、局部修复、自动重试链路。
+  - 新增重试生命周期运行事件：`tool.retry.start` / `tool.retry.end`，用于诊断与外部观测。
   - 在流式调用过程中发布 `run.start`、`llm.request`、`llm.delta`、`llm.completed`、`run.completed`、`run.error` 事件。
   - 新增工具事件：`tool.execution.start`、`tool.execution.end`。
   - 新增 Step Gate 事件：`node.pending_approval`、`node.approval.resolved`。
