@@ -446,6 +446,7 @@ export class AgentRuntime extends EventEmitter {
   ): Promise<string> {
     type ToolNodePayload = {
       step: number;
+      displayNodeId: string;
       toolCallId: string;
       toolName: string;
       intentSummary: string;
@@ -624,12 +625,14 @@ export class AgentRuntime extends EventEmitter {
             userInput
           );
           const toolNodeId = `tool-${step}-${index + 1}`;
+          const displayNodeId = `${step}.${index + 1}`;
           graph.addNode({
             id: toolNodeId,
             type: "tool",
             status: "pending",
             payload: {
               step,
+              displayNodeId,
               toolCallId: toolCall.id,
               toolName: toolCall.function.name,
               intentSummary: intent.summary,
@@ -680,6 +683,7 @@ export class AgentRuntime extends EventEmitter {
       if (node.type === "tool") {
         const payload = node.payload as ToolNodePayload;
         const step = payload.step;
+        const detailNodeId = payload.displayNodeId || currentNodeId;
         const dagInput = stateStore.resolveNodeInput(graph, currentNodeId);
         stateStore.setRunValue(`${currentNodeId}.input`, dagInput);
 
@@ -693,13 +697,13 @@ export class AgentRuntime extends EventEmitter {
 
         if (intentSummary) {
           this.emitDagNodeDetailEvent(runId, {
-            nodeId: currentNodeId,
+            nodeId: detailNodeId,
             text: `intent=${intentSummary}`
           });
         }
         if (toolGoal) {
           this.emitDagNodeDetailEvent(runId, {
-            nodeId: currentNodeId,
+            nodeId: detailNodeId,
             text: `goal=${toolGoal}`
           });
         }
@@ -851,7 +855,7 @@ export class AgentRuntime extends EventEmitter {
             }
 
             this.emitDagNodeDetailEvent(runId, {
-              nodeId: currentNodeId,
+              nodeId: detailNodeId,
               text: `retry=${attempt}/${payload.maxRetries} reason=${this.summarizeForEvent(result.content)}${repairedArgs ? " | args=updated" : " | args=unchanged"}`
             });
           }

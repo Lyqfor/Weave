@@ -9,6 +9,36 @@
 
 ## 进度记录
 
+### 2026-03-16 - Entry 050 - 重试标识未显示修复（DAG 事件节点 ID 对齐）
+
+#### 范围
+修复 `/weave auto` 下工具失败后未显示 `↻(x/y)` 的问题。
+
+#### 改动
+- 根因定位：
+  - `run-agent.ts` 的重试 detail 事件使用 DAG 内部节点 ID（如 `tool-1-1`）。
+  - TUI 渲染节点使用 Weave 语义节点 ID（如 `1.1`）。
+  - 两者不一致导致 `weave:dag-detail` 无法命中对应节点，重试状态被丢弃。
+- 修复方案：
+  - `src/agent/run-agent.ts`
+  - 工具节点 payload 新增 `displayNodeId`（格式 `step.index`，如 `1.1`）。
+  - `intent/goal/retry` 的 detail 事件统一改为发往 `displayNodeId`。
+  - 保持 DAG 内部节点 ID 与调度逻辑不变，仅修正展示事件 ID。
+
+#### 影响文件
+- src/agent/run-agent.ts
+
+#### 验证
+- 构建通过：`corepack pnpm build`。
+- 全量回归通过：`corepack pnpm verify:p0`。
+- 预期行为：工具失败且触发自动重试时，可在工具节点看到 `↻(x/y)`，最终再回落到 `✔/✖`。
+
+#### 待解决问题
+- legacy 路径仍未发出专用重试 detail（当前 weave 走 DAG，不影响主路径）。
+
+#### 下一步
+- 可选增强：为 legacy 路径补齐同结构重试事件，确保双路径展示一致。
+
 ### 2026-03-16 - Entry 049 - 工具节点重试状态可视化（retrying + 计数图标）
 
 #### 范围

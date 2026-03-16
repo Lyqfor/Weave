@@ -130,6 +130,7 @@ dagent/
   - 新增 LLM 调用复用层（`invokeLlmWithTools` / `invokeLlmText`），供主链路与工具重试共享。
   - 新增工具意图派生（intent/goal）与轻量重试机制：失败重试仅携带意图、上次参数、最近一次结果。
   - 新增 `autoMode` 运行参数：仅在 auto 模式开启失败自动修复重试；observe 模式默认不自动重试。
+  - DAG 工具节点增加 `displayNodeId(step.index)`，用于将 `intent/goal/retry` detail 事件稳定映射到 TUI 可见节点（如 `1.1`）。
   - 在流式调用过程中发布 `run.start`、`llm.request`、`llm.delta`、`llm.completed`、`run.completed`、`run.error` 事件。
   - 新增工具事件：`tool.execution.start`、`tool.execution.end`。
   - 新增 Step Gate 事件：`node.pending_approval`、`node.approval.resolved`。
