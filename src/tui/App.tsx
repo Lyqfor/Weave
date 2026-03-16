@@ -43,6 +43,36 @@ function summarizeArgs(args: string): string {
   return args.length > 70 ? `${args.slice(0, 70)}...` : args;
 }
 
+function isBackspaceKey(value: string, key: { backspace?: boolean; delete?: boolean; ctrl?: boolean }): boolean {
+  if (key.backspace) {
+    return true;
+  }
+
+  // Windows 终端下 Backspace 可能以控制字符传入。
+  if (value === "\b" || value === "\x7f") {
+    return true;
+  }
+
+  // 兼容部分终端将 Backspace 映射到 delete 且无可打印字符。
+  if (key.delete && value === "") {
+    return true;
+  }
+
+  if (key.ctrl && value.toLowerCase() === "h") {
+    return true;
+  }
+
+  return false;
+}
+
+function isPrintableInput(value: string): boolean {
+  if (!value) {
+    return false;
+  }
+
+  return !/[\x00-\x1F\x7F]/.test(value);
+}
+
 function ensureVisibleCursor(value: string): string {
   return `${value}█`;
 }
@@ -514,6 +544,7 @@ export function App(props: AppProps): React.ReactElement {
     () => weaveTreeLines.map((line) => line.id).sort(compareNodeId),
     [weaveTreeLines]
   );
+  const runActive = busy || uiState.status === "thinking" || uiState.status === "using_tool";
 
   useEffect(() => {
     if (visibleDagNodeIds.length === 0) {
@@ -521,26 +552,56 @@ export function App(props: AppProps): React.ReactElement {
       setExpandedDagNodeIds((prev) => (prev.size === 0 ? prev : new Set()));
       return;
     }
+
     const latestNodeId = visibleDagNodeIds[visibleDagNodeIds.length - 1];
 
     setSelectedDagNodeId((prev) => {
+      if (runActive) {
+        return latestNodeId;
+      }
+
       if (!prev || !visibleDagNodeIds.includes(prev)) {
         return latestNodeId;
       }
 
-      return latestNodeId;
+      return prev;
     });
 
     setExpandedDagNodeIds((prev) => {
-      if (prev.size === 1 && prev.has(latestNodeId)) {
+      if (runActive) {
+        if (prev.size === 1 && prev.has(latestNodeId)) {
+          return prev;
+        }
+
+        return new Set<string>([latestNodeId]);
+      }
+
+      if (prev.size === 0) {
+        return new Set<string>([latestNodeId]);
+      }
+
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (visibleDagNodeIds.includes(id)) {
+          next.add(id);
+        }
+      }
+
+      if (next.size === 1 && next.has(latestNodeId)) {
         return prev;
       }
 
-      return new Set<string>([latestNodeId]);
+      return next.size > 0 ? next : new Set<string>([latestNodeId]);
     });
-  }, [visibleDagNodeIds]);
+  }, [visibleDagNodeIds, runActive]);
+
+  useEffect(() => {
+    setInputCursor((prev) => clamp(prev, 0, input.length));
+  }, [input]);
 
   useInput((value, key) => {
+    const isBackspace = isBackspaceKey(value, key);
+
     if (key.ctrl && value.toLowerCase() === "c") {
       if (sigintCount === 0) {
         setSigintCount(1);
@@ -568,6 +629,7 @@ export function App(props: AppProps): React.ReactElement {
             setPendingApproval(null);
             setApprovalEditing(false);
             setInput("");
+            setInputCursor(0);
             setSystemNote("Step Gate: 已按编辑参数放行。");
           } catch {
             setSystemNote("参数不是合法 JSON，请继续编辑或按 Esc 取消编辑。");
@@ -593,7 +655,17 @@ export function App(props: AppProps): React.ReactElement {
           return;
         }
 
-        if (key.backspace) {
+        if (key.home) {
+          setInputCursor(0);
+          return;
+        }
+
+        if (key.end) {
+          setInputCursor(input.length);
+          return;
+        }
+
+        if (isBackspace) {
           setInput((prev) => {
             if (inputCursor <= 0) {
               return prev;
@@ -616,7 +688,7 @@ export function App(props: AppProps): React.ReactElement {
           return;
         }
 
-        if (value) {
+        if (isPrintableInput(value)) {
           setInput((prev) => `${prev.slice(0, inputCursor)}${value}${prev.slice(inputCursor)}`);
           setInputCursor((prev) => prev + value.length);
         }
@@ -671,6 +743,24 @@ export function App(props: AppProps): React.ReactElement {
       return;
     }
 
+    if (key.return && input.trim() === "") {
+      if (selectedDagNodeId) {
+        const targetNode = uiState.weaveDagNodes.find((node) => node.id === selectedDagNodeId);
+        if (targetNode && targetNode.details.length > 0) {
+          setExpandedDagNodeIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(selectedDagNodeId)) {
+              next.delete(selectedDagNodeId);
+            } else {
+              next.add(selectedDagNodeId);
+            }
+            return next;
+          });
+        }
+      }
+      return;
+    }
+
     if (key.leftArrow) {
       setInputCursor((prev) => Math.max(0, prev - 1));
       return;
@@ -691,24 +781,6 @@ export function App(props: AppProps): React.ReactElement {
       return;
     }
 
-    if (key.return && input.trim() === "") {
-      if (selectedDagNodeId) {
-        const targetNode = uiState.weaveDagNodes.find((node) => node.id === selectedDagNodeId);
-        if (targetNode && targetNode.details.length > 0) {
-          setExpandedDagNodeIds((prev) => {
-            const next = new Set(prev);
-            if (next.has(selectedDagNodeId)) {
-              next.delete(selectedDagNodeId);
-            } else {
-              next.add(selectedDagNodeId);
-            }
-            return next;
-          });
-        }
-      }
-      return;
-    }
-
     if (busy) {
       return;
     }
@@ -726,7 +798,7 @@ export function App(props: AppProps): React.ReactElement {
       return;
     }
 
-    if (key.backspace) {
+    if (isBackspace) {
       setInput((prev) => {
         if (inputCursor <= 0) {
           return prev;
@@ -749,7 +821,7 @@ export function App(props: AppProps): React.ReactElement {
       return;
     }
 
-    if (value) {
+    if (isPrintableInput(value)) {
       setInput((prev) => `${prev.slice(0, inputCursor)}${value}${prev.slice(inputCursor)}`);
       setInputCursor((prev) => prev + value.length);
     }
