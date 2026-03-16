@@ -9,6 +9,52 @@
 
 ## 进度记录
 
+### 2026-03-16 - Entry 056 - 启动流程验证与三服务一键启停脚本
+
+#### 范围
+验证图前端启动失败原因并修复；新增三服务（主CLI/图后端/图前端）一键启停脚本。
+
+#### 改动
+- 启动问题修复：
+  - `apps/weave-graph-web/package.json`
+  - 修正不可用依赖版本：`@types/react-dom` -> `^19.2.3`
+- 新增一键启动脚本：
+  - `scripts/start-weave-graph-all.ps1`
+  - 自动启动图后端并解析 `ingestUrl/token`
+  - 自动启动图前端
+  - 自动启动主 CLI，并注入：
+    - `WEAVE_GRAPH_INGEST_URL`
+    - `WEAVE_GRAPH_TOKEN`
+  - 写入 PID 文件：`scripts/.weave-graph-dev-pids.json`
+- 新增一键停止脚本：
+  - `scripts/stop-weave-graph-all.ps1`
+  - 读取 PID 文件并停止三服务进程
+- 根脚本入口：
+  - `package.json`
+  - `dev:graph:all` / `dev:graph:stop`
+- 文档补充：
+  - `docs/project/weave-2d-graph-blueprint.md`
+  - 增加一键脚本用法与三服务解耦关系说明
+
+#### 影响文件
+- apps/weave-graph-web/package.json
+- scripts/start-weave-graph-all.ps1
+- scripts/stop-weave-graph-all.ps1
+- package.json
+- docs/project/weave-2d-graph-blueprint.md
+
+#### 验证
+- 图后端启动日志验证通过：可输出 `ws url + ingest url + token`。
+- ingest 接口验证通过：`POST /ingest/runtime-event` 返回 `ok=true`。
+- 图前端启动验证通过：Vite 可正常启动。
+- 主项目构建通过：`corepack pnpm build`。
+
+#### 待解决问题
+- 当前脚本默认使用 PowerShell 打开新窗口，后续可补跨平台脚本（bash/Node orchestrator）。
+
+#### 下一步
+- 增加“状态检查脚本”（health check）与端到端 smoke 命令，自动验证三服务链路健康度。
+
 ### 2026-03-16 - Entry 055 - 二维图链路打通（CLI 事件转发 -> Graph Projection -> WS -> 前端）
 
 #### 范围

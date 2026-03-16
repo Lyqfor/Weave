@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
+    "dev:graph:all": "powershell -ExecutionPolicy Bypass -File scripts/start-weave-graph-all.ps1",
+    "dev:graph:stop": "powershell -ExecutionPolicy Bypass -File scripts/stop-weave-graph-all.ps1",
     "start": "node --enable-source-maps dist/index.js",
     "build": "tsc -p tsconfig.json",
     "verify:step-gate": "node scripts/verify-step-gate.mjs",

@@ -71,6 +71,18 @@ apps/
   - `WEAVE_GRAPH_TOKEN=<token>`
 5. 启动主 CLI 后，`run.start` 会自动投影出“终端输入命令”节点，验证链路是否打通。
 
+## 一键启动脚本
+- 启动三服务：`pnpm dev:graph:all`
+- 停止三服务：`pnpm dev:graph:stop`
+- 脚本位置：
+  - `scripts/start-weave-graph-all.ps1`
+  - `scripts/stop-weave-graph-all.ps1`
+
+## 解耦关系说明
+1. 主 CLI（`src/index.ts`）可独立运行（不配置图转发环境变量时，不影响原有流程）。
+2. 图后端（`apps/weave-graph-server`）独立运行，负责接收 Runtime 事件并投影为图协议。
+3. 图前端（`apps/weave-graph-web`）独立运行，仅消费图后端 WS 消息并渲染。
+
 ## 下一阶段建议
 - 增加 `blobRef` 详情拉取 API（避免大文本全量推送）。
 - 增加 100ms 布局节流与拖拽锁定。

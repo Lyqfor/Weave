@@ -94,6 +94,7 @@ dagent/
 ### 根目录文件
 - `package.json`
   - 定义脚本（`dev`、`build`、`start`、`verify:*`）与依赖。
+  - 新增二维图一键脚本入口：`dev:graph:all`、`dev:graph:stop`。
 - `tsconfig.json`
   - 定义 TypeScript 编译目标与严格模式配置。
 - `.env.example`
@@ -239,6 +240,12 @@ dagent/
   - 记录 Weave 的完整能力定义、DAG Runtime 底层架构、三种模式语义与迁移路线。
 - `docs/project/weave-2d-graph-blueprint.md`
   - 记录二维图工程蓝图、协议设计与联调步骤。
+
+### 启停脚本
+- `scripts/start-weave-graph-all.ps1`
+  - 一键启动主 CLI、图后端、图前端，并自动注入图转发环境变量。
+- `scripts/stop-weave-graph-all.ps1`
+  - 一键停止上述三服务并清理 PID 状态文件。
 
 ### 二维图骨架文件
 - `apps/weave-graph-server/src/protocol/graph-events.ts`
