@@ -29,7 +29,8 @@ const THEME = {
   assistant: "#FFE7CE",
   success: "#8FD3A6",
   danger: "#F3A2A2",
-  toolActive: "#FFC46B",
+  waiting: "#F2C94C",
+  running: "#58C4DD",
   detailBorder: "#A8743F",
   detailText: "#F0CFAD"
 } as const;
@@ -110,12 +111,96 @@ function statusIcon(status: "running" | "waiting" | "success" | "fail"): string 
     return "◓";
   }
   if (status === "waiting") {
-    return "•";
+    return "⏸";
   }
   if (status === "success") {
     return "✔";
   }
   return "✖";
+}
+
+function isLowSignalDecisionLabel(label: string): boolean {
+  const normalized = label.trim();
+  return (
+    normalized === "大模型决策中..." ||
+    normalized === "决策为调用工具" ||
+    normalized === "大模型决策完成" ||
+    normalized === "大模型决策完成，进入下一轮"
+  );
+}
+
+function extractDetailValue(details: string[], key: string): string {
+  const line = details.find((item) => item.startsWith(`${key}=`));
+  if (!line) {
+    return "";
+  }
+
+  return line.slice(key.length + 1).trim();
+}
+
+function semanticToolTitle(label: string, details: string[]): string {
+  const command = extractDetailValue(details, "command");
+  const file = extractDetailValue(details, "file");
+
+  if (label.includes("执行命令") && command) {
+    return `⚡ 运行命令: [${command}]`;
+  }
+
+  if (label.includes("读取文件") && file) {
+    return `📄 查阅文件: [${file}]`;
+  }
+
+  if (label.includes("写入文件") && file) {
+    return `✏️ 写入文件: [${file}]`;
+  }
+
+  if (label.includes("执行命令")) {
+    return "⚡ 运行命令";
+  }
+
+  if (label.includes("读取文件")) {
+    return "📄 查阅文件";
+  }
+
+  if (label.includes("写入文件")) {
+    return "✏️ 写入文件";
+  }
+
+  return label;
+}
+
+function summarizeApprovalIntent(toolName: string, argsText: string): string {
+  let args: Record<string, unknown> = {};
+  try {
+    args = JSON.parse(argsText) as Record<string, unknown>;
+  } catch {
+    args = {};
+  }
+
+  if (toolName === "command_exec") {
+    const command = typeof args.command === "string" ? args.command : "";
+    return command ? `⚡ 运行命令: [${command}]` : "⚡ 运行命令";
+  }
+
+  if (toolName === "read_file") {
+    const filePath = typeof args.filePath === "string"
+      ? args.filePath
+      : typeof args.path === "string"
+        ? args.path
+        : "";
+    return filePath ? `📄 查阅文件: [${filePath}]` : "📄 查阅文件";
+  }
+
+  if (toolName === "write_file") {
+    const filePath = typeof args.filePath === "string"
+      ? args.filePath
+      : typeof args.path === "string"
+        ? args.path
+        : "";
+    return filePath ? `✏️ 写入文件: [${filePath}]` : "✏️ 写入文件";
+  }
+
+  return `执行工具: ${toolName}`;
 }
 
 function formatDurationMs(ms: number): string {
@@ -190,6 +275,15 @@ function buildWeaveTreeLines(
     depth: number
   ): void => {
     list.forEach((node, index) => {
+      const children = byParent.get(node.id) ?? [];
+      const shouldFlattenThisNode =
+        !node.id.includes(".") && children.length > 0 && isLowSignalDecisionLabel(node.label);
+
+      if (shouldFlattenThisNode) {
+        walk(children, prefix, depth);
+        return;
+      }
+
       const isLast = index === list.length - 1;
       const branch = depth === 0 ? "" : `${isLast ? "└─" : "├─"} `;
       const branchPrefix = `${prefix}${branch}`;
@@ -215,7 +309,6 @@ function buildWeaveTreeLines(
         details: node.details
       });
 
-      const children = byParent.get(node.id) ?? [];
       if (children.length > 0) {
         const childPrefix = depth === 0 ? "" : `${prefix}${isLast ? "   " : "│  "}`;
         walk(children, childPrefix, depth + 1);
@@ -381,9 +474,13 @@ export function App(props: AppProps): React.ReactElement {
     void processTurn(props.initialInput);
   }, [processTurn, props.initialInput]);
 
+  const weaveTreeLines = useMemo(
+    () => buildWeaveTreeLines(uiState.weaveDagNodes, expandedDagNodeIds),
+    [uiState.weaveDagNodes, expandedDagNodeIds]
+  );
   const weaveNodeIds = useMemo(
-    () => uiState.weaveDagNodes.map((node) => node.id).sort(compareNodeId),
-    [uiState.weaveDagNodes]
+    () => weaveTreeLines.map((line) => line.id).sort(compareNodeId),
+    [weaveTreeLines]
   );
 
   useEffect(() => {
@@ -599,10 +696,7 @@ export function App(props: AppProps): React.ReactElement {
     return "";
   }, [uiState.chatLogs]);
 
-  const visibleTranscriptLines = weaveActiveTurn
-    ? transcriptLines.filter((line) => line.role === "user").slice(-1)
-    : transcriptLines.slice(-TRANSCRIPT_MAX_LINES);
-  const weaveTreeLines = buildWeaveTreeLines(uiState.weaveDagNodes, expandedDagNodeIds);
+  const visibleTranscriptLines = weaveActiveTurn ? [] : transcriptLines.slice(-TRANSCRIPT_MAX_LINES);
 
   const statusText =
     uiState.status === "thinking"
@@ -642,7 +736,8 @@ export function App(props: AppProps): React.ReactElement {
               const selected = line.id === selectedDagNodeId;
               const foldPrefix = line.hasDetails ? (line.isExpanded ? "[-] " : "[+] ") : "";
               const nodeKind = line.id.includes(".") ? "工具" : "决策";
-              const nodeText = `${line.branchPrefix}${foldPrefix}${statusIcon(line.status)} [${nodeKind}] ${line.id} ${line.label}${line.durationText}`;
+              const semanticLabel = line.id.includes(".") ? semanticToolTitle(line.label, line.details) : line.label;
+              const nodeText = `${line.branchPrefix}${foldPrefix}${statusIcon(line.status)} [${nodeKind}] ${line.id} ${semanticLabel}${line.durationText}`;
               const prefix = selected ? "▸ " : "  ";
 
               return (
@@ -654,9 +749,9 @@ export function App(props: AppProps): React.ReactElement {
                         : line.isCurrent
                           ? THEME.panelTitle
                           : line.status === "running"
-                            ? THEME.primaryStrong
+                            ? THEME.running
                             : line.status === "waiting"
-                              ? THEME.toolActive
+                              ? THEME.waiting
                               : line.status === "success"
                                 ? THEME.success
                                 : THEME.danger
@@ -679,10 +774,12 @@ export function App(props: AppProps): React.ReactElement {
             })}
 
             {pendingApproval ? (
-              <Box borderStyle="round" borderColor={THEME.toolActive} paddingX={1} flexDirection="column" marginTop={1}>
-                <Text color={THEME.toolActive}>⏸ STEP GATE · 等待放行</Text>
-                <Text color={THEME.text}>tool: {pendingApproval.toolName}</Text>
-                <Text color={THEME.detailText}>args: {pendingApproval.argsText}</Text>
+              <Box borderStyle="round" borderColor={THEME.waiting} paddingX={1} flexDirection="column" marginTop={1}>
+                <Text color={THEME.waiting}>⏸ STEP GATE · 等待放行</Text>
+                <Text color={THEME.text}>{summarizeApprovalIntent(pendingApproval.toolName, pendingApproval.argsText)}</Text>
+                {approvalEditing ? (
+                  <Text color={THEME.detailText}>args: {pendingApproval.argsText}</Text>
+                ) : null}
                 <Text color={THEME.muted}>
                   {approvalEditing
                     ? "编辑参数中：回车提交，Esc 取消"
