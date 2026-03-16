@@ -21,6 +21,7 @@ dagent/
   src/
     agent/
       plugins/
+    runtime/
     config/
     llm/
     tui/
@@ -66,6 +67,11 @@ dagent/
 9. 终端界面层（TUI Layer）
 - 基于 Ink（React for CLI）实现动态终端界面。
 - 通过事件网关监听 Runtime 事件并驱动细粒度 UI 状态更新。
+
+10. 运行器层（Runner Layer）
+- 提供执行内核抽象（legacy / dag）与选择器。
+- 当前默认走 legacy 运行器，保持行为兼容。
+- 为后续 DagRunner 渐进替换预留扩展位。
 
 ## 文件职责说明
 
@@ -129,6 +135,13 @@ dagent/
 - `src/agent/message-dispatcher.ts`
   - 输入分发层：统一对用户输入做命令拦截、模式切换与问答消息分类。
   - 将控制命令（如 `/weave on`、`/q`）与问答执行解耦，避免 UI/入口层重复分支逻辑。
+- `src/runtime/runner-types.ts`
+  - 定义 Runner 抽象契约与运行参数类型（含 Step Gate 审批类型）。
+- `src/runtime/runner-legacy.ts`
+  - legacy 运行器适配层：将执行请求委托给现有 Agent-loop。
+- `src/runtime/runner-selector.ts`
+  - 运行器选择器：按模式选择执行内核。
+  - 当前 `dag` 模式先回落到 `legacy`，用于保障行为一致并支持渐进迁移。
 - `src/index.ts`
   - CLI 入口，启动 Ink TUI 多轮会话（单次命令常驻）。
   - 显式初始化 `MemoryStore` 并注入 Agent Runtime。

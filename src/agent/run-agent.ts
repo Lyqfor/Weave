@@ -5,6 +5,13 @@ import { MemoryStore } from "../memory/memory-store.js";
 import { AppLogger } from "../logging/app-logger.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import type { ToolExecuteResult } from "../tools/tool-types.js";
+import { createRuntimeRunner, type RunnerMode } from "../runtime/runner-selector.js";
+import type {
+  AgentRunner,
+  RunOnceStreamOptions,
+  ToolApprovalDecision,
+  ToolApprovalRequest
+} from "../runtime/runner-types.js";
 import type OpenAI from "openai";
 import type {
   AgentLoopPlugin,
@@ -54,20 +61,6 @@ export interface AgentRunEvent {
   };
 }
 
-export interface ToolApprovalRequest {
-  runId: string;
-  step: number;
-  toolName: string;
-  toolCallId: string;
-  args: unknown;
-  argsText: string;
-}
-
-export interface ToolApprovalDecision {
-  action: "approve" | "edit" | "skip" | "abort";
-  editedArgs?: unknown;
-}
-
 interface StepGateOptions {
   enabled: boolean;
   approveToolCall?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
@@ -83,6 +76,8 @@ export class AgentRuntime extends EventEmitter {
   private readonly historyMessages: ChatHistoryMessage[] = [];
   private readonly streamChunkSize = 14;
   private readonly streamChunkDelayMs = 8;
+  private readonly runnerMode: RunnerMode = "legacy";
+  private readonly runner: AgentRunner;
 
   constructor(
     private readonly llmConfig: LlmConfig,
@@ -95,9 +90,17 @@ export class AgentRuntime extends EventEmitter {
     this.memoryStore = memoryStore ?? new MemoryStore();
     this.toolRegistry = toolRegistry ?? new ToolRegistry();
     this.memoryStore.ensureMemoryFiles();
+    this.runner = createRuntimeRunner({
+      mode: this.runnerMode,
+      executeLegacy: async ({ userInput, options }) => {
+        return await this.runOnceStreamLegacy(userInput, options);
+      }
+    });
+
     this.logger.info("runtime.init", "AgentRuntime 初始化完成", {
       provider: this.llmConfig.provider,
-      model: this.llmConfig.model
+      model: this.llmConfig.model,
+      runnerMode: this.runnerMode
     });
   }
 
@@ -135,11 +138,14 @@ export class AgentRuntime extends EventEmitter {
 
   async runOnceStream(
     userInput: string,
-    options?: {
-      plugins?: AgentLoopPlugin[];
-      stepMode?: boolean;
-      approveToolCall?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
-    }
+    options?: RunOnceStreamOptions
+  ): Promise<string> {
+    return await this.runner.run({ userInput, options });
+  }
+
+  private async runOnceStreamLegacy(
+    userInput: string,
+    options?: RunOnceStreamOptions
   ): Promise<string> {
     // 使用 runId 串联一轮执行中全部事件，便于后续观测、回放和排障。
     const runId = this.createRunId();

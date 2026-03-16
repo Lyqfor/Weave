@@ -9,6 +9,39 @@
 
 ## 进度记录
 
+### 2026-03-16 - Entry 035 - 底层重构第 2 步：Runner 双轨抽象（先兼容）
+
+#### 范围
+在保持现有行为不变前提下，完成执行内核抽象层（Runner Layer），为 DagRunner 渐进替换做准备。
+
+#### 改动
+- 新增运行器类型与选择器：
+  - `src/runtime/runner-types.ts`
+  - `src/runtime/runner-legacy.ts`
+  - `src/runtime/runner-selector.ts`
+- `AgentRuntime` 接入 Runner 抽象：
+  - 对外 `runOnceStream` 改为统一调用 `runner.run(...)`
+  - 新增 `runOnceStreamLegacy(...)` 承载原有执行逻辑
+  - 默认 `runnerMode=legacy`，确保 off/on/step 当前行为一致
+- 架构文档补充 Runner Layer 分层与文件职责。
+
+#### 影响文件
+- src/runtime/runner-types.ts
+- src/runtime/runner-legacy.ts
+- src/runtime/runner-selector.ts
+- src/agent/run-agent.ts
+- docs/project/architecture-and-files.md
+
+#### 验证
+- 构建验证：`corepack pnpm build`。
+- 回归验证：`node scripts/verify-step-gate.mjs`。
+
+#### 待解决问题
+- 目前 `dag` 模式仍回落到 `legacy`，尚未实现独立 DagRunner 调度。
+
+#### 下一步
+进入重构第 3 步：实现 DagRunner 最小骨架（llm/tool/final 节点），并在 on/step 模式下灰度接入。
+
 ### 2026-03-16 - Entry 034 - 底层重构第 1 步：输入分发层解耦
 
 #### 范围
