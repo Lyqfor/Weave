@@ -351,9 +351,6 @@ export class AgentRuntime extends EventEmitter {
       for (const toolCall of toolCalls) {
         const toolName = toolCall.function.name;
 
-        // 工具阶段也以流式文本给出进度提示，提升交互可读性。
-        await this.emitTextAsStream(runId, `\n[工具执行中] ${toolName}\n`);
-
         let parsedArgs: unknown = {};
         try {
           parsedArgs = JSON.parse(toolCall.function.arguments || "{}");
@@ -465,8 +462,6 @@ export class AgentRuntime extends EventEmitter {
                 workspaceRoot: process.cwd()
               });
 
-        await this.emitTextAsStream(runId, `[工具执行完成] ${toolName}\n`);
-
         for (const plugin of plugins) {
           const output = await plugin.afterToolExecution?.({
             ...basePluginContext,
@@ -505,8 +500,6 @@ export class AgentRuntime extends EventEmitter {
         });
       }
 
-      // 工具执行与下一轮模型请求之间增加轻量状态流，减少“卡住感”。
-      await this.emitTextAsStream(runId, "[正在根据工具结果继续推理...]\n");
     }
 
     const fallback = "已达到最大工具调用步数，请缩小问题范围后重试。";

@@ -50,7 +50,6 @@ export interface AgentUiState {
   latestError: string;
 }
 
-const MAX_THOUGHT_TEXT = 300;
 const MAX_LOG_ITEMS = 40;
 
 export function useAgentState(gateway: AgentUiEventGateway): AgentUiState {
@@ -91,12 +90,8 @@ export function useAgentState(gateway: AgentUiEventGateway): AgentUiState {
       });
     };
 
-    const onAgentThought = (event: AgentThoughtEvent): void => {
+    const onAgentThought = (_event: AgentThoughtEvent): void => {
       setStatus((prev) => (prev === "using_tool" ? prev : "thinking"));
-      setThoughtText((prev) => {
-        const combined = (prev + event.text).slice(-MAX_THOUGHT_TEXT);
-        return combined;
-      });
     };
 
     const onToolStart = (event: ToolStartEvent): void => {

@@ -385,24 +385,14 @@ export function App(props: AppProps): React.ReactElement {
       setExpandedDagNodeIds(new Set());
       return;
     }
-
-    const activeNode = [...uiState.weaveDagNodes]
-      .filter((node) => node.status === "running" || node.status === "waiting")
-      .sort((a, b) => b.updatedAtMs - a.updatedAtMs)[0];
-
-    const resolvedSelected = (() => {
-      if (selectedDagNodeId && weaveNodeIds.includes(selectedDagNodeId)) {
-        return selectedDagNodeId;
-      }
-
-      return activeNode?.id ?? weaveNodeIds[weaveNodeIds.length - 1];
-    })();
+    const latestNodeId = weaveNodeIds[weaveNodeIds.length - 1];
 
     setSelectedDagNodeId((prev) => {
-      if (prev && weaveNodeIds.includes(prev)) {
-        return prev;
+      if (!prev || !weaveNodeIds.includes(prev)) {
+        return latestNodeId;
       }
-      return resolvedSelected;
+
+      return latestNodeId;
     });
 
     setExpandedDagNodeIds((prev) => {
@@ -413,13 +403,11 @@ export function App(props: AppProps): React.ReactElement {
         }
       }
 
-      if (!activeNode) {
-        next.add(weaveNodeIds[weaveNodeIds.length - 1]);
-      }
+      next.add(latestNodeId);
 
       return next;
     });
-  }, [selectedDagNodeId, uiState.weaveDagNodes, weaveNodeIds]);
+  }, [uiState.weaveDagNodes, weaveNodeIds]);
 
   useInput((value, key) => {
     if (key.ctrl && value.toLowerCase() === "c") {
@@ -634,19 +622,6 @@ export function App(props: AppProps): React.ReactElement {
       </Box>
 
       <Box marginTop={0} flexDirection="column">
-        {pendingApproval ? (
-          <Box borderStyle="round" borderColor={THEME.toolActive} paddingX={1} flexDirection="column" marginBottom={1}>
-            <Text color={THEME.toolActive}>⏸ STEP GATE · 等待放行</Text>
-            <Text color={THEME.text}>tool: {pendingApproval.toolName}</Text>
-            <Text color={THEME.detailText}>args: {summarizeLine(pendingApproval.argsText, transcriptTextMax)}</Text>
-            <Text color={THEME.muted}>
-              {approvalEditing
-                ? "编辑参数中：回车提交，Esc 取消"
-                : "Enter=放行 | E=编辑 | S=跳过 | Q=终止本轮"}
-            </Text>
-          </Box>
-        ) : null}
-
         {weaveTreeLines.length > 0 ? (
           <Box borderStyle="round" borderColor={THEME.border} paddingX={1} flexDirection="column" marginBottom={1}>
             <Text color={THEME.primaryStrong}>⎈ WEAVE DAG</Text>
@@ -680,7 +655,7 @@ export function App(props: AppProps): React.ReactElement {
                     <Box marginLeft={Math.min(line.detailIndent + 2, 24)} borderStyle="round" borderColor={THEME.detailBorder} paddingX={1} flexDirection="column">
                       {line.details.map((detail, detailIndex) => (
                         <Text key={`weave-${line.id}-detail-${detailIndex}`} color={selected ? THEME.panelTitle : THEME.detailText}>
-                          {summarizeLine(detail, transcriptTextMax)}
+                          {detail}
                         </Text>
                       ))}
                     </Box>
@@ -688,6 +663,19 @@ export function App(props: AppProps): React.ReactElement {
                 </Box>
               );
             })}
+
+            {pendingApproval ? (
+              <Box borderStyle="round" borderColor={THEME.toolActive} paddingX={1} flexDirection="column" marginTop={1}>
+                <Text color={THEME.toolActive}>⏸ STEP GATE · 等待放行</Text>
+                <Text color={THEME.text}>tool: {pendingApproval.toolName}</Text>
+                <Text color={THEME.detailText}>args: {pendingApproval.argsText}</Text>
+                <Text color={THEME.muted}>
+                  {approvalEditing
+                    ? "编辑参数中：回车提交，Esc 取消"
+                    : "Enter=放行 | E=编辑 | S=跳过 | Q=终止本轮"}
+                </Text>
+              </Box>
+            ) : null}
           </Box>
         ) : null}
 

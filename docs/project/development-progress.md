@@ -933,6 +933,40 @@
 #### 下一步
 补充交互式 TTY 端到端自动测试（含键位序列回放）以覆盖 UI 侧审批按键体验。
 
+### 2026-03-16 - Entry 031 - 抖动治理与 Weave Step 交互细节优化
+
+#### 范围
+修复多轮问答场景下输入框抖动问题，并优化 `/weave step` 提示区域位置、节点默认选中策略与节点详情显示完整性。
+
+#### 改动
+- 输入抖动治理：
+  - `use-agent-state.ts` 不再在 `llm.delta` 高频事件中累积 `thoughtText`，减少无效重渲染。
+  - `run-agent.ts` 移除工具执行阶段的合成流式进度文本（开始/结束/继续推理提示），降低渲染抖动源。
+- Weave Step 提示区域：
+  - `App.tsx` 中 Step Gate 选择提示框从 DAG 上方移动到 WEAVE DAG 框内底部。
+  - 用户完成选择（approve/edit/skip/abort）后继续按既有逻辑即时移除提示框。
+- 节点默认位置策略：
+  - `App.tsx` 改为始终将当前选中节点定位为最后一个节点（最新节点）。
+  - 同步确保最后一个节点默认展开，避免回到首节点。
+- 节点详情完整展示：
+  - 移除 DAG 详情行的截断渲染，展开后显示完整 detail 文本。
+
+#### 影响文件
+- src/tui/use-agent-state.ts
+- src/agent/run-agent.ts
+- src/tui/App.tsx
+
+#### 验证
+- 构建验证通过：`pnpm build`。
+- Step Gate 冒烟验证通过：`node scripts/verify-step-gate.mjs`。
+- 非 TTY 集成验证通过：`/weave step -> s -> /q` 链路可执行并正常结束会话。
+
+#### 待解决问题
+- 交互式 TTY 下的视觉“绝对无抖动”仍依赖真实终端字体/窗口尺寸，需在用户本机终端做最终观感验收。
+
+#### 下一步
+补充一轮真实 TTY 场景的录屏级验收（多轮输入 + DAG 展开收起 + Step Gate 选择）。
+
 ## 当前待办清单
 - [ ] Tool registry + before/after hooks（M1）
 - [ ] Session memory persistence（M1）
