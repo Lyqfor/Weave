@@ -6,6 +6,7 @@ import { AppLogger } from "../logging/app-logger.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import type { ToolExecuteResult } from "../tools/tool-types.js";
 import { createRuntimeRunner, type RunnerMode } from "../runtime/runner-selector.js";
+import { DagExecutionGraph } from "../runtime/dag-graph.js";
 import type {
   AgentRunner,
   RunOnceStreamOptions,
@@ -77,7 +78,8 @@ export class AgentRuntime extends EventEmitter {
   private readonly streamChunkSize = 14;
   private readonly streamChunkDelayMs = 8;
   private readonly runnerMode: RunnerMode = "legacy";
-  private readonly runner: AgentRunner;
+  private readonly legacyRunner: AgentRunner;
+  private readonly dagRunner: AgentRunner;
 
   constructor(
     private readonly llmConfig: LlmConfig,
@@ -90,10 +92,22 @@ export class AgentRuntime extends EventEmitter {
     this.memoryStore = memoryStore ?? new MemoryStore();
     this.toolRegistry = toolRegistry ?? new ToolRegistry();
     this.memoryStore.ensureMemoryFiles();
-    this.runner = createRuntimeRunner({
-      mode: this.runnerMode,
+    this.legacyRunner = createRuntimeRunner({
+      mode: "legacy",
       executeLegacy: async ({ userInput, options }) => {
         return await this.runOnceStreamLegacy(userInput, options);
+      },
+      executeDag: async ({ userInput, options }) => {
+        return await this.runOnceStreamDag(userInput, options);
+      }
+    });
+    this.dagRunner = createRuntimeRunner({
+      mode: "dag",
+      executeLegacy: async ({ userInput, options }) => {
+        return await this.runOnceStreamLegacy(userInput, options);
+      },
+      executeDag: async ({ userInput, options }) => {
+        return await this.runOnceStreamDag(userInput, options);
       }
     });
 
@@ -140,7 +154,8 @@ export class AgentRuntime extends EventEmitter {
     userInput: string,
     options?: RunOnceStreamOptions
   ): Promise<string> {
-    return await this.runner.run({ userInput, options });
+    const runner = this.shouldUseDagRunner(options) ? this.dagRunner : this.legacyRunner;
+    return await runner.run({ userInput, options });
   }
 
   private async runOnceStreamLegacy(
@@ -271,6 +286,468 @@ export class AgentRuntime extends EventEmitter {
       });
       throw error;
     }
+  }
+
+  private async runOnceStreamDag(
+    userInput: string,
+    options?: RunOnceStreamOptions
+  ): Promise<string> {
+    const runId = this.createRunId();
+    this.turnIndex += 1;
+
+    this.logger.info("run.stream.start", "开始执行 DAG 流式调用", {
+      runId,
+      sessionId: this.sessionId,
+      turnIndex: this.turnIndex,
+      userInputLength: userInput.length
+    });
+
+    this.emitRunEvent({
+      type: "run.start",
+      runId,
+      timestamp: new Date().toISOString(),
+      payload: { userInput, sessionId: this.sessionId, turnIndex: this.turnIndex }
+    });
+
+    this.emitRunEvent({
+      type: "llm.request",
+      runId,
+      timestamp: new Date().toISOString(),
+      payload: { userInput, sessionId: this.sessionId, turnIndex: this.turnIndex }
+    });
+
+    try {
+      const plugins = options?.plugins ?? [];
+      const basePluginContext: AgentPluginRunContext = {
+        runId,
+        sessionId: this.sessionId,
+        turnIndex: this.turnIndex,
+        userInput
+      };
+
+      for (const plugin of plugins) {
+        const output = await plugin.onRunStart?.(basePluginContext);
+        this.emitPluginOutput(runId, output);
+      }
+
+      const composedSystemPrompt = this.memoryStore.buildSystemPrompt(this.llmConfig.systemPrompt);
+      const finalText = await this.runAgentDagLoop(
+        runId,
+        userInput,
+        composedSystemPrompt,
+        plugins,
+        basePluginContext,
+        {
+          enabled: options?.stepMode === true,
+          approveToolCall: options?.approveToolCall
+        }
+      );
+
+      this.historyMessages.push({ role: "user", content: userInput });
+      this.historyMessages.push({ role: "assistant", content: finalText });
+
+      this.emitRunEvent({
+        type: "llm.completed",
+        runId,
+        timestamp: new Date().toISOString(),
+        payload: { finalText, sessionId: this.sessionId, turnIndex: this.turnIndex }
+      });
+
+      this.emitRunEvent({
+        type: "run.completed",
+        runId,
+        timestamp: new Date().toISOString(),
+        payload: { finalText, sessionId: this.sessionId, turnIndex: this.turnIndex }
+      });
+
+      this.logger.info("run.stream.completed", "DAG 流式调用完成", {
+        runId,
+        sessionId: this.sessionId,
+        turnIndex: this.turnIndex,
+        responseLength: finalText.length
+      });
+
+      for (const plugin of plugins) {
+        const output = await plugin.onRunCompleted?.({
+          ...basePluginContext,
+          finalText
+        });
+        this.emitPluginOutput(runId, output);
+      }
+
+      return finalText;
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const plugins = options?.plugins ?? [];
+      const basePluginContext: AgentPluginRunContext = {
+        runId,
+        sessionId: this.sessionId,
+        turnIndex: this.turnIndex,
+        userInput
+      };
+
+      for (const plugin of plugins) {
+        const output = await plugin.onRunError?.({
+          ...basePluginContext,
+          errorMessage
+        });
+        this.emitPluginOutput(runId, output);
+      }
+
+      this.logger.error("run.stream.error", "DAG 流式调用失败", {
+        runId,
+        sessionId: this.sessionId,
+        turnIndex: this.turnIndex,
+        errorMessage
+      });
+      this.emitRunEvent({
+        type: "run.error",
+        runId,
+        timestamp: new Date().toISOString(),
+        payload: { errorMessage, sessionId: this.sessionId, turnIndex: this.turnIndex }
+      });
+      throw error;
+    }
+  }
+
+  private async runAgentDagLoop(
+    runId: string,
+    userInput: string,
+    systemPrompt: string,
+    plugins: AgentLoopPlugin[],
+    basePluginContext: AgentPluginRunContext,
+    stepGate: StepGateOptions
+  ): Promise<string> {
+    type ToolNodePayload = {
+      step: number;
+      toolCallId: string;
+      toolName: string;
+      rawArgsText: string;
+    };
+
+    type FinalNodePayload = {
+      text: string;
+    };
+
+    const maxSteps = 6;
+    const modelTools = this.toolRegistry.listModelTools();
+    const graph = new DagExecutionGraph();
+    const workingMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = this.historyMessages.map(
+      (message) => ({
+        role: message.role,
+        content: message.content
+      })
+    );
+    workingMessages.push({ role: "user", content: userInput });
+
+    let finalText = "";
+
+    const addLlmNode = (step: number, dependsOnNodeIds: string[] = []): string => {
+      const nodeId = `llm-${step}`;
+      graph.addNode({
+        id: nodeId,
+        type: "llm",
+        status: "pending",
+        payload: { step }
+      });
+
+      for (const depId of dependsOnNodeIds) {
+        graph.addEdge(depId, nodeId);
+      }
+
+      return nodeId;
+    };
+
+    addLlmNode(1);
+
+    while (graph.hasPendingWork()) {
+      const readyNodeIds = graph.getReadyNodeIds().sort();
+      if (readyNodeIds.length === 0) {
+        throw new Error("DAG 调度死锁：存在未完成节点但无可执行 ready 节点");
+      }
+
+      const currentNodeId = readyNodeIds[0];
+      const node = graph.getNode(currentNodeId);
+      graph.setStatus(currentNodeId, "running");
+
+      if (node.type === "llm") {
+        const step = (node.payload as { step: number }).step;
+        this.logger.info("run.dag.step", "DAG 调度执行 LLM 节点", {
+          runId,
+          step,
+          nodeId: currentNodeId,
+          sessionId: this.sessionId,
+          turnIndex: this.turnIndex,
+          modelToolCount: modelTools.length
+        });
+
+        let effectiveSystemPrompt = systemPrompt;
+        for (const plugin of plugins) {
+          const changed = await plugin.beforeLlmRequest?.({
+            ...basePluginContext,
+            step,
+            systemPrompt: effectiveSystemPrompt,
+            messages: workingMessages
+          });
+
+          if (changed?.systemPrompt) {
+            effectiveSystemPrompt = changed.systemPrompt;
+          }
+
+          this.emitPluginOutput(runId, changed?.output);
+        }
+
+        const assistantMessage = await this.llmClient.chatWithTools({
+          systemPrompt: effectiveSystemPrompt,
+          messages: workingMessages,
+          tools: modelTools
+        });
+
+        for (const plugin of plugins) {
+          const output = await plugin.afterLlmResponse?.({
+            ...basePluginContext,
+            step,
+            assistantMessage
+          });
+          this.emitPluginOutput(runId, output);
+        }
+
+        const toolCalls = assistantMessage.tool_calls ?? [];
+        if (toolCalls.length === 0) {
+          const finalNodeId = `final-${step}`;
+          graph.addNode({
+            id: finalNodeId,
+            type: "final",
+            status: "pending",
+            payload: {
+              text: assistantMessage.content ?? ""
+            } satisfies FinalNodePayload
+          });
+          graph.addEdge(currentNodeId, finalNodeId);
+          graph.setStatus(currentNodeId, "success");
+          continue;
+        }
+
+        workingMessages.push({
+          role: "assistant",
+          content: assistantMessage.content ?? "",
+          tool_calls: toolCalls
+        });
+
+        const toolNodeIds: string[] = [];
+        for (let index = 0; index < toolCalls.length; index += 1) {
+          const toolCall = toolCalls[index];
+          const toolNodeId = `tool-${step}-${index + 1}`;
+          graph.addNode({
+            id: toolNodeId,
+            type: "tool",
+            status: "pending",
+            payload: {
+              step,
+              toolCallId: toolCall.id,
+              toolName: toolCall.function.name,
+              rawArgsText: toolCall.function.arguments || "{}"
+            } satisfies ToolNodePayload
+          });
+          graph.addEdge(currentNodeId, toolNodeId);
+          toolNodeIds.push(toolNodeId);
+        }
+
+        if (step + 1 <= maxSteps) {
+          addLlmNode(step + 1, toolNodeIds);
+        } else {
+          const finalNodeId = `final-max-${step}`;
+          graph.addNode({
+            id: finalNodeId,
+            type: "final",
+            status: "pending",
+            payload: {
+              text: "已达到最大工具调用步数，请缩小问题范围后重试。"
+            } satisfies FinalNodePayload
+          });
+          for (const toolNodeId of toolNodeIds) {
+            graph.addEdge(toolNodeId, finalNodeId);
+          }
+        }
+
+        graph.setStatus(currentNodeId, "success");
+        continue;
+      }
+
+      if (node.type === "tool") {
+        const payload = node.payload as ToolNodePayload;
+        const step = payload.step;
+
+        let parsedArgs: unknown = {};
+        try {
+          parsedArgs = JSON.parse(payload.rawArgsText || "{}");
+        } catch {
+          parsedArgs = {};
+        }
+
+        let effectiveArgs = parsedArgs;
+        let skipByApproval = false;
+
+        if (stepGate.enabled && stepGate.approveToolCall) {
+          graph.setStatus(currentNodeId, "blocked");
+          this.emitRunEvent({
+            type: "node.pending_approval",
+            runId,
+            timestamp: new Date().toISOString(),
+            payload: {
+              sessionId: this.sessionId,
+              turnIndex: this.turnIndex,
+              toolName: payload.toolName,
+              toolCallId: payload.toolCallId,
+              toolArgsText: this.summarizeForEvent(parsedArgs),
+              toolArgsJsonText: this.safeJsonStringify(parsedArgs)
+            }
+          });
+
+          const decision = await stepGate.approveToolCall({
+            runId,
+            step,
+            toolName: payload.toolName,
+            toolCallId: payload.toolCallId,
+            args: parsedArgs,
+            argsText: this.safeJsonStringify(parsedArgs)
+          });
+
+          if (decision.action === "abort") {
+            this.emitRunEvent({
+              type: "node.approval.resolved",
+              runId,
+              timestamp: new Date().toISOString(),
+              payload: {
+                sessionId: this.sessionId,
+                turnIndex: this.turnIndex,
+                toolName: payload.toolName,
+                toolCallId: payload.toolCallId,
+                approvalAction: "abort"
+              }
+            });
+            throw new Error("用户终止了当前回合执行");
+          }
+
+          if (decision.action === "edit" && decision.editedArgs !== undefined) {
+            effectiveArgs = decision.editedArgs;
+          }
+
+          if (decision.action === "skip") {
+            skipByApproval = true;
+          }
+
+          this.emitRunEvent({
+            type: "node.approval.resolved",
+            runId,
+            timestamp: new Date().toISOString(),
+            payload: {
+              sessionId: this.sessionId,
+              turnIndex: this.turnIndex,
+              toolName: payload.toolName,
+              toolCallId: payload.toolCallId,
+              approvalAction: decision.action,
+              toolArgsText: this.summarizeForEvent(effectiveArgs),
+              toolArgsJsonText: this.safeJsonStringify(effectiveArgs)
+            }
+          });
+          graph.setStatus(currentNodeId, "running");
+        }
+
+        this.emitRunEvent({
+          type: "tool.execution.start",
+          runId,
+          timestamp: new Date().toISOString(),
+          payload: {
+            sessionId: this.sessionId,
+            turnIndex: this.turnIndex,
+            toolName: payload.toolName,
+            toolCallId: payload.toolCallId,
+            toolArgsText: this.summarizeForEvent(effectiveArgs),
+            toolArgsJsonText: this.safeJsonStringify(effectiveArgs)
+          }
+        });
+
+        for (const plugin of plugins) {
+          const output = await plugin.beforeToolExecution?.({
+            ...basePluginContext,
+            step,
+            toolName: payload.toolName,
+            toolCallId: payload.toolCallId,
+            args: effectiveArgs
+          });
+          this.emitPluginOutput(runId, output);
+        }
+
+        const result: ToolExecuteResult =
+          skipByApproval
+            ? {
+                ok: false,
+                content: "[SKIPPED by approval gate]",
+                metadata: { skippedByUser: true }
+              }
+            : await this.toolRegistry.execute(payload.toolName, effectiveArgs, {
+                sessionId: this.sessionId,
+                runId,
+                workspaceRoot: process.cwd()
+              });
+
+        for (const plugin of plugins) {
+          const output = await plugin.afterToolExecution?.({
+            ...basePluginContext,
+            step,
+            toolName: payload.toolName,
+            toolCallId: payload.toolCallId,
+            args: effectiveArgs,
+            result
+          });
+          this.emitPluginOutput(runId, output);
+        }
+
+        this.emitRunEvent({
+          type: "tool.execution.end",
+          runId,
+          timestamp: new Date().toISOString(),
+          payload: {
+            sessionId: this.sessionId,
+            turnIndex: this.turnIndex,
+            toolName: payload.toolName,
+            toolCallId: payload.toolCallId,
+            toolOk: result.ok,
+            toolStatus: result.ok ? "success" : "fail",
+            toolResultText: this.summarizeForEvent(result.content)
+          }
+        });
+
+        workingMessages.push({
+          role: "tool",
+          tool_call_id: payload.toolCallId,
+          content: JSON.stringify({
+            ok: result.ok,
+            content: result.content,
+            metadata: result.metadata
+          })
+        });
+
+        graph.setStatus(currentNodeId, result.ok ? "success" : "fail");
+        continue;
+      }
+
+      if (node.type === "final") {
+        const payload = node.payload as FinalNodePayload;
+        finalText = payload.text;
+        await this.emitTextAsStream(runId, finalText);
+        graph.setStatus(currentNodeId, "success");
+        return finalText;
+      }
+    }
+
+    if (!finalText) {
+      finalText = "已达到最大工具调用步数，请缩小问题范围后重试。";
+      await this.emitTextAsStream(runId, finalText);
+    }
+
+    return finalText;
   }
 
   private async runAgentLoop(
@@ -576,6 +1053,14 @@ export class AgentRuntime extends EventEmitter {
     } catch {
       return "{}";
     }
+  }
+
+  private shouldUseDagRunner(options?: RunOnceStreamOptions): boolean {
+    if (!options?.plugins || options.plugins.length === 0) {
+      return false;
+    }
+
+    return options.plugins.some((plugin) => plugin.name === "weave");
   }
 
 

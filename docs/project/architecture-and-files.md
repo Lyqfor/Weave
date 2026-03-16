@@ -124,7 +124,9 @@ dagent/
   - 提供 `AgentRuntime` 抽象，当前暴露 `runOnce(userInput)` 和 `runOnceStream(userInput)`。
   - 提供 `startSession(sessionId)` 初始化会话，并维护多轮历史上下文。
   - 在调用前通过 `MemoryStore` 组装系统提示词并注入模型。
-  - 内置 Agent loop：模型可触发工具调用，工具结果回填后继续推理直到得到最终答案。
+  - 内置双执行路径：Legacy loop 与最小 DagRunner。
+  - 在 `weave=off` 时走 legacy；`weave=on/step` 时走 DagRunner。
+  - DagRunner 以节点/依赖图驱动执行，保留现有插件钩子与 Step Gate 事件。
   - 在流式调用过程中发布 `run.start`、`llm.request`、`llm.delta`、`llm.completed`、`run.completed`、`run.error` 事件。
   - 新增工具事件：`tool.execution.start`、`tool.execution.end`。
   - 新增 Step Gate 事件：`node.pending_approval`、`node.approval.resolved`。
@@ -139,9 +141,13 @@ dagent/
   - 定义 Runner 抽象契约与运行参数类型（含 Step Gate 审批类型）。
 - `src/runtime/runner-legacy.ts`
   - legacy 运行器适配层：将执行请求委托给现有 Agent-loop。
+- `src/runtime/runner-dag.ts`
+  - Dag 运行器适配层：将执行请求委托给 DAG 执行内核。
 - `src/runtime/runner-selector.ts`
   - 运行器选择器：按模式选择执行内核。
-  - 当前 `dag` 模式先回落到 `legacy`，用于保障行为一致并支持渐进迁移。
+  - 当前支持 `legacy` 与 `dag` 双运行器选择。
+- `src/runtime/dag-graph.ts`
+  - 最小 DAG 图模型：支持节点依赖、就绪判定与环路检测。
 - `src/index.ts`
   - CLI 入口，启动 Ink TUI 多轮会话（单次命令常驻）。
   - 显式初始化 `MemoryStore` 并注入 Agent Runtime。

@@ -9,6 +9,43 @@
 
 ## 进度记录
 
+### 2026-03-16 - Entry 036 - 底层重构第 3 步：DagRunner 最小骨架接入
+
+#### 范围
+实现最小 DagRunner 执行链路（llm/tool/final 节点），并在 weave 模式下灰度启用，off 模式继续走 legacy。
+
+#### 改动
+- 新增最小 DAG 图模型：
+  - `src/runtime/dag-graph.ts`（节点、依赖边、ready 判定、环路检测）
+- 新增 DagRunner 适配层：
+  - `src/runtime/runner-dag.ts`
+- 运行器选择器升级：
+  - `src/runtime/runner-selector.ts` 支持 `legacy/dag` 双运行器
+- AgentRuntime 接入双运行器并按请求动态路由：
+  - `weave=off` -> legacy
+  - `weave=on/step` -> dag
+- 在 `run-agent.ts` 新增 `runOnceStreamDag` 与 `runAgentDagLoop`：
+  - 以 DAG 节点/依赖驱动执行顺序
+  - 预留并复用现有插件钩子与 Step Gate 审批事件
+  - 保持工具执行层接口不变
+
+#### 影响文件
+- src/runtime/dag-graph.ts
+- src/runtime/runner-dag.ts
+- src/runtime/runner-selector.ts
+- src/agent/run-agent.ts
+- docs/project/architecture-and-files.md
+
+#### 验证
+- 构建通过：`corepack pnpm build`。
+- 回归通过：`node scripts/verify-step-gate.mjs`。
+
+#### 待解决问题
+- 当前 DagRunner 仍为最小线性图执行，不含条件/并行/join 节点。
+
+#### 下一步
+进入重构第 4 步：抽离 DAG 事件协议与节点数据结构类型，增加数据边与状态总线（StateStore）最小实现。
+
 ### 2026-03-16 - Entry 035 - 底层重构第 2 步：Runner 双轨抽象（先兼容）
 
 #### 范围

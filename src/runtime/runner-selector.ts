@@ -1,4 +1,5 @@
 import { LegacyAgentRunner } from "./runner-legacy.js";
+import { DagAgentRunner } from "./runner-dag.js";
 import type { AgentRunner, RunnerExecuteRequest } from "./runner-types.js";
 
 /**
@@ -9,12 +10,12 @@ export type RunnerMode = "legacy" | "dag";
 export interface RunnerSelectorInput {
   mode: RunnerMode;
   executeLegacy: (request: RunnerExecuteRequest) => Promise<string>;
+  executeDag: (request: RunnerExecuteRequest) => Promise<string>;
 }
 
 export function createRuntimeRunner(input: RunnerSelectorInput): AgentRunner {
   if (input.mode === "dag") {
-    // 第 2 步先保留行为一致：dag 模式暂时回落到 legacy。
-    return new LegacyAgentRunner(input.executeLegacy);
+    return new DagAgentRunner(input.executeDag);
   }
 
   return new LegacyAgentRunner(input.executeLegacy);
