@@ -280,6 +280,10 @@ export class AgentRuntime extends EventEmitter {
         payload: { finalText, sessionId: this.sessionId, turnIndex: this.turnIndex }
       });
 
+      // 先发插件收尾输出（weave.dag.node/detail），再发布 run.completed。
+      // 否则图投影层会先关闭 run 映射，导致同一轮被拆成 runId 与 session:turn 两个 DAG。
+      await executeOnRunCompleted(plugins, { ...basePluginContext, finalText }, runId, this.emitPluginOutput.bind(this));
+
       this.emitRunEvent({
         type: "run.completed",
         runId,
@@ -293,8 +297,6 @@ export class AgentRuntime extends EventEmitter {
         turnIndex: this.turnIndex,
         responseLength: finalText.length
       });
-
-      await executeOnRunCompleted(plugins, { ...basePluginContext, finalText }, runId, this.emitPluginOutput.bind(this));
 
       return finalText;
     } catch (error: unknown) {
@@ -725,7 +727,10 @@ export class AgentRuntime extends EventEmitter {
             step,
             toolName: payload.toolName,
             toolCallId: payload.toolCallId,
-            args: effectiveArgs
+            args: effectiveArgs,
+            intentSummary: payload.intentSummary,
+            attempt: 1,
+            maxRetries: payload.maxRetries
           });
           this.emitPluginOutput(runId, output);
         }
@@ -891,7 +896,12 @@ export class AgentRuntime extends EventEmitter {
             toolName: payload.toolName,
             toolCallId: payload.toolCallId,
             args: effectiveArgs,
-            result
+            result,
+            intentSummary: payload.intentSummary,
+            attempt,
+            totalAttempts,
+            wasRepaired: attempt > 1,
+            allFailed: !result.ok && attempt >= totalAttempts
           });
           this.emitPluginOutput(runId, output);
         }
@@ -971,6 +981,7 @@ export class AgentRuntime extends EventEmitter {
   ): Promise<string> {
     // 每轮最多执行 maxSteps 次，防止模型和工具之间出现无限循环。
     const maxSteps = MAX_AGENT_STEPS;
+    const defaultToolTimeoutMs = getDefaultToolTimeoutMs();
     const modelTools = this.toolRegistry.listModelTools();
 
     // 构建本轮工作消息：历史用户/助手对话 + 本轮用户输入。
@@ -1139,71 +1150,159 @@ export class AgentRuntime extends EventEmitter {
           }
         });
 
-        for (const plugin of plugins) {
-          const output = await plugin.beforeToolExecution?.({
-            ...basePluginContext,
-            step,
-            toolName,
-            toolCallId: toolCall.id,
-            args: effectiveArgs
-          });
-          this.emitPluginOutput(runId, output);
-        }
-
         const maxRetries = stepGate.autoMode === true ? getDefaultToolRetries() : 0;
-        let result: ToolExecuteResult =
-          skipByApproval
-            ? {
-                ok: false,
-                content: "[SKIPPED by approval gate]",
-                metadata: { skippedByUser: true }
-              }
-            : {
-                ok: false,
-                content: "工具执行失败",
-                metadata: {}
-              };
+        let result: ToolExecuteResult = skipByApproval
+          ? { ok: false, content: "[SKIPPED by approval gate]", metadata: { skippedByUser: true } }
+          : { ok: false, content: "工具执行失败", metadata: {} };
 
-        if (!skipByApproval) {
+        if (skipByApproval) {
+          // 用户跳过：仍需通知插件（attempt=1, allFailed=true）
+          for (const plugin of plugins) {
+            const output = await plugin.beforeToolExecution?.({
+              ...basePluginContext,
+              step,
+              toolName,
+              toolCallId: toolCall.id,
+              args: effectiveArgs,
+              intentSummary: toolIntent.summary,
+              attempt: 1,
+              maxRetries: 0,
+              previousError: undefined,
+              repairedFrom: undefined
+            });
+            this.emitPluginOutput(runId, output);
+          }
+          for (const plugin of plugins) {
+            const output = await plugin.afterToolExecution?.({
+              ...basePluginContext,
+              step,
+              toolName,
+              toolCallId: toolCall.id,
+              args: effectiveArgs,
+              result,
+              intentSummary: toolIntent.summary,
+              attempt: 1,
+              totalAttempts: 1,
+              wasRepaired: false,
+              allFailed: true
+            });
+            this.emitPluginOutput(runId, output);
+          }
+        } else {
+          // 正常执行：每次尝试都调用 beforeToolExecution / afterToolExecution
           let attempt = 0;
+          let previousError: string | undefined;
+          let wasRepaired = false;
+          let argsBeforeRepair: Record<string, unknown> | undefined;
+
           while (attempt <= maxRetries) {
             attempt += 1;
-            result = await this.toolRegistry.execute(toolName, stripRuntimeToolMeta(effectiveArgs), {
-              sessionId: this.sessionId,
+
+            // 每次尝试前触发 beforeToolExecution（携带重试上下文）
+            for (const plugin of plugins) {
+              const output = await plugin.beforeToolExecution?.({
+                ...basePluginContext,
+                step,
+                toolName,
+                toolCallId: toolCall.id,
+                args: effectiveArgs,
+                intentSummary: toolIntent.summary,
+                attempt,
+                maxRetries,
+                previousError,
+                repairedFrom: attempt > 1 ? argsBeforeRepair : undefined
+              });
+              this.emitPluginOutput(runId, output);
+            }
+
+            if (attempt > 1) {
+              this.emitRunEvent({
+                type: "tool.retry.start",
+                runId,
+                timestamp: new Date().toISOString(),
+                payload: {
+                  sessionId: this.sessionId,
+                  turnIndex: this.turnIndex,
+                  toolName,
+                  toolCallId: toolCall.id,
+                  retryAttempt: attempt,
+                  retryMax: maxRetries + 1,
+                  retryReason: previousError,
+                  retryPrepared: wasRepaired
+                }
+              });
+            }
+
+            result = await executeToolWithTimeoutFn(this.toolRegistry, {
+              toolName,
+              args: effectiveArgs,
+              timeoutMs: defaultToolTimeoutMs,
               runId,
-              workspaceRoot: process.cwd()
-            });
+              step,
+              toolCallId: toolCall.id,
+              sessionId: this.sessionId
+            }, this.logger);
+
+            const isFinalAttempt = !result.ok && attempt > maxRetries;
+
+            // 每次尝试后触发 afterToolExecution（携带重试结果）
+            for (const plugin of plugins) {
+              const output = await plugin.afterToolExecution?.({
+                ...basePluginContext,
+                step,
+                toolName,
+                toolCallId: toolCall.id,
+                args: effectiveArgs,
+                result,
+                intentSummary: toolIntent.summary,
+                attempt,
+                totalAttempts: maxRetries + 1,
+                wasRepaired,
+                allFailed: isFinalAttempt
+              });
+              this.emitPluginOutput(runId, output);
+            }
+
+            if (attempt > 1) {
+              this.emitRunEvent({
+                type: "tool.retry.end",
+                runId,
+                timestamp: new Date().toISOString(),
+                payload: {
+                  sessionId: this.sessionId,
+                  turnIndex: this.turnIndex,
+                  toolName,
+                  toolCallId: toolCall.id,
+                  toolOk: result.ok,
+                  retryAttempt: attempt,
+                  retryMax: maxRetries + 1
+                }
+              });
+            }
 
             if (result.ok || attempt > maxRetries) {
               break;
             }
 
+            // 本次失败且还有重试机会：调用局部上下文 LLM 修复参数
+            argsBeforeRepair = stripRuntimeToolMeta(effectiveArgs);
+            previousError = summarizeText(result.content, 300);
+
             const repairResult = await repairToolArgsByIntent(
               {
                 toolName,
                 intentSummary: toolIntent.summary,
-                previousArgs: stripRuntimeToolMeta(effectiveArgs),
-                lastResult: summarizeText(result.content, 300)
+                previousArgs: argsBeforeRepair,
+                lastResult: previousError
               },
               systemPrompt,
               (input) => this.invokeLlmText(input)
             );
             if (repairResult.repairedArgs) {
               effectiveArgs = attachIntentToToolArgs(repairResult.repairedArgs, toolIntent);
+              wasRepaired = true;
             }
           }
-        }
-
-        for (const plugin of plugins) {
-          const output = await plugin.afterToolExecution?.({
-            ...basePluginContext,
-            step,
-            toolName,
-            toolCallId: toolCall.id,
-            args: effectiveArgs,
-            result
-          });
-          this.emitPluginOutput(runId, output);
         }
 
         this.emitRunEvent({
@@ -1291,12 +1390,9 @@ export class AgentRuntime extends EventEmitter {
     });
   }
 
-  private shouldUseDagRunner(options?: RunOnceStreamOptions): boolean {
-    if (!options?.plugins || options.plugins.length === 0) {
-      return false;
-    }
-
-    return options.plugins.some((plugin) => plugin.name === "weave");
+  private shouldUseDagRunner(_options?: RunOnceStreamOptions): boolean {
+    // 统一使用单一执行路径（Legacy），WEAVE 通过钩子系统观测，无需分叉执行路径。
+    return false;
   }
 
 

@@ -145,10 +145,13 @@
 - **问题**:
 	- 插件钩子抽取后，执行器通过函数引用调用导致 `this` 丢失。
 	- 重试/超时配置在模块加载时读取，运行时环境变量更新无效。
+	- `run.completed` 先于插件收尾事件发布，导致图投影层将同一轮拆成两个 DAG（`session:turn-x` 与 `run_xxx`）。
 - **方案**:
 	- `executePluginHook` 改为 `hook.call(plugin, context)` 保持实例上下文。
 	- 增加 `getDefaultToolRetries/getDefaultToolTimeoutMs`，在运行路径实时读取环境变量。
-- **涉及文件**: `src/agent/plugin-executor.ts`, `src/config/defaults.ts`, `src/agent/run-agent.ts`
+	- `run-agent` 中插件收尾输出提前到 `run.completed` 之前发布。
+	- `GraphProjector` 对已结束 run 增加短暂上下文保留窗口，吸收晚到 `plugin.output`。
+- **涉及文件**: `src/agent/plugin-executor.ts`, `src/config/defaults.ts`, `src/agent/run-agent.ts`, `apps/weave-graph-server/src/projection/graph-projector.ts`
 
 ---
 

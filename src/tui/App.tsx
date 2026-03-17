@@ -75,7 +75,15 @@ export function App(props: AppProps): React.ReactElement {
   const lastRunIdRef = useRef("");
   const approvalResolverRef = useRef<((decision: { action: "approve" | "edit" | "skip" | "abort"; editedArgs?: unknown }) => void) | null>(null);
   const sigintTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const webPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const endedRef = useRef(false);
+
+  const cancelWebPoll = useCallback(() => {
+    if (webPollTimerRef.current) {
+      clearInterval(webPollTimerRef.current);
+      webPollTimerRef.current = null;
+    }
+  }, []);
 
   const endSession = useCallback(
     (reason: string) => {
@@ -150,7 +158,66 @@ export function App(props: AppProps): React.ReactElement {
                     });
                     setInput("");
                     setInputCursor(0);
-                    setSystemNote("Step Gate: Enter=放行, E=编辑参数, S=跳过, Q=终止本轮");
+
+                    // 若已配置图服务，通知 Web 前端显示审批面板并轮询决策
+                    const ingestUrl = process.env.WEAVE_GRAPH_INGEST_URL?.trim() ?? "";
+                    const ingestToken = process.env.WEAVE_GRAPH_TOKEN?.trim() ?? "";
+                    if (ingestUrl) {
+                      const serverBase = ingestUrl.replace(/\/ingest\/runtime-event$/, "");
+                      // 发送 gate.pending 事件让服务端广播给前端
+                      void fetch(ingestUrl, {
+                        method: "POST",
+                        headers: {
+                          "content-type": "application/json",
+                          ...(ingestToken ? { "x-graph-token": ingestToken } : {})
+                        },
+                        body: JSON.stringify({
+                          runId: lastRunIdRef.current,
+                          type: "tool.gate.pending",
+                          timestamp: new Date().toISOString(),
+                          payload: {
+                            toolCallId: request.toolCallId,
+                            toolName: request.toolName,
+                            toolParams: request.argsText || "{}"
+                          }
+                        })
+                      }).catch(() => { /* 忽略网络错误 */ });
+
+                      // 轮询服务端获取 Web 前端的审批决策
+                      if (webPollTimerRef.current) {
+                        clearInterval(webPollTimerRef.current);
+                      }
+                      webPollTimerRef.current = setInterval(() => {
+                        void fetch(`${serverBase}/api/gate/decision/${request.toolCallId}`, {
+                          headers: ingestToken ? { "x-graph-token": ingestToken } : {}
+                        }).then(async (resp) => {
+                          if (resp.status === 200) {
+                            const data = await resp.json() as { action?: string; params?: string };
+                            if (data.action && approvalResolverRef.current) {
+                              clearInterval(webPollTimerRef.current!);
+                              webPollTimerRef.current = null;
+                              // 通知服务端已消费决策
+                              void fetch(`${serverBase}/api/gate/decision/${request.toolCallId}`, {
+                                method: "DELETE",
+                                headers: ingestToken ? { "x-graph-token": ingestToken } : {}
+                              }).catch(() => { /* 忽略 */ });
+                              const resolver = approvalResolverRef.current;
+                              approvalResolverRef.current = null;
+                              setPendingApproval(null);
+                              setSystemNote(`Step Gate: Web 前端已操作 (${data.action})`);
+                              resolver({
+                                action: data.action as "approve" | "edit" | "skip" | "abort",
+                                editedArgs: data.params ? tryParseEditedArgs(data.params) : undefined
+                              });
+                            }
+                          }
+                        }).catch(() => { /* 忽略网络错误 */ });
+                      }, 400);
+
+                      setSystemNote("Step Gate: 可在 Web 前端或按 Enter/E/S/Q 决策");
+                    } else {
+                      setSystemNote("Step Gate: Enter=放行, E=编辑参数, S=跳过, Q=终止本轮");
+                    }
                   });
                 }
               : undefined
@@ -160,6 +227,7 @@ export function App(props: AppProps): React.ReactElement {
         const errorMessage = error instanceof Error ? error.message : String(error);
         props.recorder.recordError(nextTurn, errorMessage, lastRunIdRef.current);
       } finally {
+        cancelWebPoll();
         approvalResolverRef.current = null;
         setPendingApproval(null);
         setApprovalEditing(false);
@@ -301,6 +369,7 @@ export function App(props: AppProps): React.ReactElement {
         if (key.return) {
           try {
             const editedArgs = JSON.parse(input || "{}");
+            cancelWebPoll();
             approvalResolverRef.current?.({ action: "edit", editedArgs });
             approvalResolverRef.current = null;
             setPendingApproval(null);
@@ -374,6 +443,7 @@ export function App(props: AppProps): React.ReactElement {
 
       const lower = value.toLowerCase();
       if (key.return) {
+        cancelWebPoll();
         approvalResolverRef.current?.({ action: "approve" });
         approvalResolverRef.current = null;
         setPendingApproval(null);
@@ -390,6 +460,7 @@ export function App(props: AppProps): React.ReactElement {
       }
 
       if (lower === "s") {
+        cancelWebPoll();
         approvalResolverRef.current?.({ action: "skip" });
         approvalResolverRef.current = null;
         setPendingApproval(null);
@@ -398,6 +469,7 @@ export function App(props: AppProps): React.ReactElement {
       }
 
       if (lower === "q") {
+        cancelWebPoll();
         approvalResolverRef.current?.({ action: "abort" });
         approvalResolverRef.current = null;
         setPendingApproval(null);
@@ -686,4 +758,12 @@ export function App(props: AppProps): React.ReactElement {
       </Box>
     </Box>
   );
+}
+
+function tryParseEditedArgs(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
 }

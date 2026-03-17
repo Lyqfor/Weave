@@ -14,7 +14,15 @@
       "Bash(wc:*)",
       "Bash(grep:*)",
       "Bash(find:*)",
-      "Bash(xargs:*)"
+      "Bash(xargs:*)",
+      "Bash(node scripts/verify-step-gate.mjs)",
+      "Bash(node scripts/verify-dag-matrix.mjs)",
+      "Bash(pnpm verify:p0)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(pnpm install:*)",
+      "Bash(pnpm add:*)",
+      "Bash(pnpm:*)"
     ]
   }
 }

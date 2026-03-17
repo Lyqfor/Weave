@@ -35,6 +35,16 @@ export interface BeforeToolExecutionContext extends AgentPluginRunContext {
   toolName: string;
   toolCallId: string;
   args: unknown;
+  /** 工具调用意图摘要（来自 LLM 输出或 deriveToolIntent 推导） */
+  intentSummary?: string;
+  /** 当前尝试次数（1-indexed，第一次为 1） */
+  attempt: number;
+  /** 最大重试次数（0 表示不重试，仅执行一次） */
+  maxRetries: number;
+  /** 上次失败原因（仅 attempt > 1 时有值） */
+  previousError?: string;
+  /** 修复前的参数（仅 attempt > 1 且参数已被 RepairLLM 修复时有值） */
+  repairedFrom?: Record<string, unknown>;
 }
 
 export interface AfterToolExecutionContext extends AgentPluginRunContext {
@@ -43,6 +53,16 @@ export interface AfterToolExecutionContext extends AgentPluginRunContext {
   toolCallId: string;
   args: unknown;
   result: ToolExecuteResult;
+  /** 工具调用意图摘要 */
+  intentSummary?: string;
+  /** 本次尝试次数（1-indexed） */
+  attempt: number;
+  /** 总尝试次数上限（maxRetries + 1） */
+  totalAttempts: number;
+  /** 参数是否经过 RepairLLM 修复 */
+  wasRepaired: boolean;
+  /** 是否所有尝试均失败（最后一次失败时为 true，触发 Escalation） */
+  allFailed?: boolean;
 }
 
 export interface RunCompletedContext extends AgentPluginRunContext {

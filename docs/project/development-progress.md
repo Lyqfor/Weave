@@ -9,6 +9,79 @@
 
 ## 进度记录
 
+### 2026-03-17 - Entry 067 - 架构重构：单一执行路径 + 丰富钩子上下文 + TurnDAGBuilder
+
+#### 范围
+合并 Legacy/DAG 双执行路径为单一 `runAgentLoop`；丰富插件钩子上下文携带重试信息；WeavePlugin 重构为 TurnDAGBuilder 模式，支持完整节点类型体系。
+
+#### 改动
+- **`src/agent/plugins/agent-plugin.ts`**：
+  - `BeforeToolExecutionContext` 新增：`intentSummary?`、`attempt`（1-indexed）、`maxRetries`、`previousError?`、`repairedFrom?`
+  - `AfterToolExecutionContext` 新增：`intentSummary?`、`attempt`、`totalAttempts`、`wasRepaired`、`allFailed?`
+- **`apps/shared/graph-protocol.ts`**：
+  - `NodeUpsertPayload.kind` 新增：`"input" | "attempt" | "escalation" | "condition"`
+  - `EdgeUpsertPayload` 新增：`fromPort?`、`toPort?`、`edgeKind?`（dependency/data/retry/condition_true/condition_false）
+- **`src/agent/run-agent.ts`**：
+  - `shouldUseDagRunner` 始终返回 `false`（单一执行路径）
+  - `runAgentLoop` 重构工具执行内循环：每次尝试前后各调用 `beforeToolExecution`/`afterToolExecution`，携带完整重试上下文
+  - 新增超时支持：使用 `executeToolWithTimeoutFn` 替代裸 `toolRegistry.execute`
+- **`src/weave/weave-plugin.ts`**：
+  - 新增 `TurnDAGBuilder` 类：管理节点状态，生成规范化节点 ID（`input`/`llm-N`/`tool-N`/`tool-N:attempt-M`/`tool-N:repair-M`/`tool-N:escalation`/`final`）
+  - 新增 `buildDagEdge()` 及 `weave.dag.edge` 输出类型：显式声明节点间数据流边和重试链边
+  - 节点事件新增 `kind` 字段（不再依赖 GraphProjector 的启发式推断）
+  - 完整节点链路：InputNode → LlmNode → ToolNode → AttemptNode → RepairNode → AttemptNode → EscalationNode / FinalNode
+- **`apps/weave-graph-server/src/projection/graph-projector.ts`**：
+  - 处理新 `weave.dag.edge` 事件 → 转化为带 `fromPort`/`toPort`/`edgeKind` 的 `edge.upsert`
+  - `weave.dag.node` 优先使用 `kind` 字段，回退到 `inferKind` 启发式推断
+- **`apps/weave-graph-web/src/store/graph-store.ts`**：
+  - `edge.upsert` 处理新增 `edgeKind`：retry 边虚线橙色，data 边动画
+- **`scripts/verify-dag-matrix.mjs`**：
+  - 更新断言以匹配新的事件类型（`weave.dag.node` 替代 `weave.dag.event`，`node.pending_approval` 替代 `dag.node.transition`）
+
+#### 验证
+- 构建通过：`pnpm build`
+- Step Gate 回归通过：`node scripts/verify-step-gate.mjs`
+- DAG 语义回归通过：`node scripts/verify-dag-matrix.mjs`
+- 完整 P0 套件通过：`pnpm verify:p0`
+
+#### 待解决问题
+- DAG runner（`runAgentDagLoop`）代码仍保留在 run-agent.ts 中（已死代码），可在后续清理
+- FinalNode 与 EscalationNode 的 I/O port 尚未填充（计划在 node.io 层丰富）
+
+#### 下一步
+- 补充 AttemptNode/RepairNode 的 `node.io` 数据（args 作为 inputPort，result 作为 outputPort）
+- Step Gate 通过 `beforeToolExecution` 返回 deferred promise 实现（Phase 3）
+- TUI 和 Web 统一事件流（Phase 4）
+
+### 2026-03-17 - Entry 066 - 修复同轮双 DAG 分裂（run_xxx 与 session:turn 并存）
+
+#### 范围
+排查并修复“单次回答在前端出现两个 DAG”的链路问题，目标是将本轮最终输出稳定归并到同一 DAG 末尾节点。
+
+#### 改动
+- 运行时事件顺序修复：
+  - [src/agent/run-agent.ts](src/agent/run-agent.ts)
+  - 将插件收尾输出（`executeOnRunCompleted`）前移到 `run.completed` 事件之前。
+  - 避免图投影层在 run 完结后再收到晚到插件事件，从而产生 `run_xxx` 新 DAG。
+- 图投影容错增强：
+  - [apps/weave-graph-server/src/projection/graph-projector.ts](apps/weave-graph-server/src/projection/graph-projector.ts)
+  - 为已完成 run 增加短暂上下文保留窗口（grace period），吸收晚到 `plugin.output`。
+  - 增加上下文上限与定期清理，避免内存无限增长。
+
+#### 验证
+- 构建通过：`pnpm build`
+- Step Gate 回归通过：`node scripts/verify-step-gate.mjs`
+- DAG 语义回归通过：`node scripts/verify-dag-matrix.mjs`
+- 定向复现验证通过（模拟 `run.completed` 后晚到 `plugin.output`）：
+  - 输出 `DAG_IDS ["s1:turn-3"]`
+  - 输出 `PASS_SINGLE_DAG`
+
+#### 待解决问题
+- 目前该场景验证为脚本内定向验证，后续应补充为常驻单测用例防回归。
+
+#### 下一步
+- 在图服务或 runtime 层补充自动化用例：断言同一 run 的全部事件只能产生一个 dagId。
+
 ### 2026-03-17 - Entry 065 - 修复 /weave on 无节点（插件 this 绑定 + 动态配置读取）
 
 #### 范围

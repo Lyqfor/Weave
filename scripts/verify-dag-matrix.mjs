@@ -117,8 +117,12 @@ async function verifyRetryRecovery(config) {
   assert(finalText === "retry-ok", "retry path should still finish with final response");
   assert(executeCount === 2, "retry path should execute tool twice");
   assert(
-    events.some((event) => event.type === "plugin.output" && event.payload?.outputType === "weave.dag.event"),
-    "retry path should emit versioned dag event"
+    events.some((event) => event.type === "plugin.output" && (
+      event.payload?.outputType === "weave.dag.node" ||
+      event.payload?.outputType === "weave.dag.edge" ||
+      event.payload?.outputType === "weave.dag.event"
+    )),
+    "retry path should emit weave dag events"
   );
 }
 
@@ -228,18 +232,15 @@ async function verifyApprovalInterruptRecovery(config) {
     "approval path should emit resolved approve event"
   );
 
-  const dagTransitionEvents = events
-    .filter((event) => event.type === "plugin.output" && event.payload?.outputType === "weave.dag.event")
-    .map((event) => safeJsonParse(event.payload?.outputText || ""))
-    .filter((item) => item && item.eventType === "dag.node.transition");
-
+  // 新版单一执行路径：审批流程通过 node.pending_approval / node.approval.resolved 事件表达
+  // DAG runner 的 dag.node.transition(blocked/approval-resumed) 已由统一事件取代
   assert(
-    dagTransitionEvents.some((event) => event.payload?.toStatus === "blocked"),
-    "approval path should include blocked transition"
+    events.some((event) => event.type === "node.pending_approval"),
+    "approval path should include pending approval event"
   );
   assert(
-    dagTransitionEvents.some((event) => event.payload?.toStatus === "running" && event.payload?.reason === "approval-resumed"),
-    "approval path should include resume transition"
+    events.some((event) => event.type === "node.approval.resolved" && event.payload?.approvalAction === "approve"),
+    "approval path should include approval resolved event"
   );
 }
 
