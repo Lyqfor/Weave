@@ -6,6 +6,8 @@ import type {
   EdgeUpsertPayload,
   GraphEnvelope,
   NodeIoPayload,
+  NodePendingApprovalPayload,
+  NodeApprovalResolvedPayload,
   NodeStatusPayload,
   NodeUpsertPayload,
   RunEndPayload,
@@ -21,10 +23,15 @@ export type RuntimeRawEvent = {
 };
 
 export class GraphProjector {
+  private static readonly RUN_CONTEXT_GRACE_MS = 30_000;
+  private static readonly MAX_RUN_CONTEXTS = 256;
   private seqByRun = new Map<string, number>();
   private dagIdByRun = new Map<string, string>();
+  private completedAtByRun = new Map<string, number>();
 
   project(event: RuntimeRawEvent): Array<GraphEnvelope<unknown>> {
+    this.pruneRunContexts(Date.now());
+
     const out: Array<GraphEnvelope<unknown>> = [];
 
     if (event.type === "run.start") {
@@ -33,41 +40,12 @@ export class GraphProjector {
       const turnIndex = this.numberValue(event.payload?.turnIndex);
       const dagId = this.buildDagId(event.runId, sessionId, turnIndex);
       this.dagIdByRun.set(event.runId, dagId);
-      const inputNodeId = `${event.runId}:input`;
+      this.completedAtByRun.delete(event.runId);
       out.push(this.wrap<RunStartPayload>(event.runId, "run.start", event.timestamp, {
         dagId,
         sessionId,
         turnIndex,
         userInputSummary: userInput
-      }));
-
-      out.push(this.wrap<NodeUpsertPayload>(event.runId, "node.upsert", event.timestamp, {
-        nodeId: inputNodeId,
-        kind: "system",
-        title: this.looksLikeCommand(userInput) ? "终端输入命令" : "终端输入"
-      }));
-
-      out.push(this.wrap<NodeStatusPayload>(event.runId, "node.status", event.timestamp, {
-        nodeId: inputNodeId,
-        status: "success"
-      }));
-
-      out.push(this.wrap<NodeIoPayload>(event.runId, "node.io", event.timestamp, {
-        nodeId: inputNodeId,
-        inputPorts: [
-          {
-            name: "stdin",
-            type: "text",
-            summary: userInput
-          }
-        ],
-        outputPorts: [
-          {
-            name: "input.text",
-            type: "text",
-            summary: userInput
-          }
-        ]
       }));
     }
 
@@ -76,18 +54,19 @@ export class GraphProjector {
         ok: event.type === "run.completed",
         finalSummary: this.stringValue(event.payload?.finalText) || this.stringValue(event.payload?.errorMessage)
       }));
-      // 运行结束后清理内部映射，防止内存泄漏。
-      this.seqByRun.delete(event.runId);
-      this.dagIdByRun.delete(event.runId);
+      // run 结束后保留短暂上下文，吸收可能晚到的 plugin.output，避免拆分为第二个 runId DAG。
+      this.completedAtByRun.set(event.runId, Date.now());
     }
 
     if (event.type === "plugin.output" && this.stringValue(event.payload?.outputType) === "weave.dag.node") {
       const parsed = this.safeJson(this.stringValue(event.payload?.outputText));
       if (parsed?.nodeId) {
+        // 优先使用插件明确传递的 kind，回退到启发式推断
+        const explicitKind = parsed.kind ? String(parsed.kind) : undefined;
         out.push(this.wrap<NodeUpsertPayload>(event.runId, "node.upsert", event.timestamp, {
           nodeId: String(parsed.nodeId),
           parentId: parsed.parentId ? String(parsed.parentId) : undefined,
-          kind: this.inferKind(String(parsed.nodeId), String(parsed.label || "")),
+          kind: (explicitKind as NodeUpsertPayload["kind"]) ?? this.inferKind(String(parsed.nodeId), String(parsed.label || "")),
           title: String(parsed.label || "")
         }));
 
@@ -104,6 +83,71 @@ export class GraphProjector {
             target: String(parsed.nodeId)
           }));
         }
+      }
+    }
+
+    if (event.type === "plugin.output" && this.stringValue(event.payload?.outputType) === "weave.dag.edge") {
+      const parsed = this.safeJson(this.stringValue(event.payload?.outputText));
+      if (parsed?.sourceId && parsed?.targetId) {
+        const sourceId = String(parsed.sourceId);
+        const targetId = String(parsed.targetId);
+        const edgeId = parsed.edgeKind
+          ? `${sourceId}->${targetId}:${String(parsed.edgeKind)}`
+          : `${sourceId}->${targetId}`;
+        out.push(this.wrap<EdgeUpsertPayload>(event.runId, "edge.upsert", event.timestamp, {
+          edgeId,
+          source: sourceId,
+          target: targetId,
+          fromPort: parsed.fromPort ? String(parsed.fromPort) : undefined,
+          toPort: parsed.toPort ? String(parsed.toPort) : undefined,
+          edgeKind: parsed.edgeKind as EdgeUpsertPayload["edgeKind"] | undefined,
+          label: parsed.label ? String(parsed.label) : undefined
+        }));
+      }
+    }
+
+    if (event.type === "tool.gate.pending") {
+      const toolCallId = this.stringValue(event.payload?.toolCallId);
+      const toolName = this.stringValue(event.payload?.toolName) || "unknown";
+      const toolParams = this.stringValue(event.payload?.toolParams) || "{}";
+      if (toolCallId) {
+        const gateNodeId = `gate:${toolCallId.slice(-8)}`;
+        out.push(this.wrap<NodeUpsertPayload>(event.runId, "node.upsert", event.timestamp, {
+          nodeId: gateNodeId,
+          kind: "gate",
+          title: `Step Gate · ${toolName}`
+        }));
+        out.push(this.wrap<NodeStatusPayload>(event.runId, "node.status", event.timestamp, {
+          nodeId: gateNodeId,
+          status: "running"
+        }));
+        out.push(this.wrap<NodePendingApprovalPayload>(event.runId, "node.pending_approval", event.timestamp, {
+          nodeId: gateNodeId,
+          toolName,
+          toolParams
+        }));
+      }
+    }
+
+    if (event.type === "tool.gate.resolved") {
+      const toolCallId = this.stringValue(event.payload?.toolCallId);
+      const action = this.stringValue(event.payload?.action) as "approve" | "edit" | "skip" | "abort";
+      if (toolCallId) {
+        const gateNodeId = `gate:${toolCallId.slice(-8)}`;
+        const statusMap: Record<string, NodeStatusPayload["status"]> = {
+          approve: "success",
+          edit: "success",
+          skip: "skipped",
+          abort: "fail"
+        };
+        out.push(this.wrap<NodeStatusPayload>(event.runId, "node.status", event.timestamp, {
+          nodeId: gateNodeId,
+          status: statusMap[action] ?? "success"
+        }));
+        out.push(this.wrap<NodeApprovalResolvedPayload>(event.runId, "node.approval.resolved", event.timestamp, {
+          nodeId: gateNodeId,
+          action
+        }));
       }
     }
 
@@ -147,6 +191,31 @@ export class GraphProjector {
       return `${sessionId}:turn-${turnIndex}`;
     }
     return runId;
+  }
+
+  private pruneRunContexts(nowMs: number): void {
+    // 先清理超过保留窗口的运行上下文。
+    for (const [runId, completedAt] of this.completedAtByRun.entries()) {
+      if (nowMs - completedAt > GraphProjector.RUN_CONTEXT_GRACE_MS) {
+        this.completedAtByRun.delete(runId);
+        this.seqByRun.delete(runId);
+        this.dagIdByRun.delete(runId);
+      }
+    }
+
+    // 兜底限制上下文数量，避免极端长跑服务累积。
+    if (this.seqByRun.size <= GraphProjector.MAX_RUN_CONTEXTS) {
+      return;
+    }
+
+    const candidates = [...this.completedAtByRun.entries()].sort((a, b) => a[1] - b[1]);
+    const overflow = this.seqByRun.size - GraphProjector.MAX_RUN_CONTEXTS;
+    for (let index = 0; index < overflow && index < candidates.length; index += 1) {
+      const runId = candidates[index][0];
+      this.completedAtByRun.delete(runId);
+      this.seqByRun.delete(runId);
+      this.dagIdByRun.delete(runId);
+    }
   }
 
   private inferKind(nodeId: string, label: string): NodeUpsertPayload["kind"] {
