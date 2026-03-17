@@ -26,6 +26,128 @@ body,
 /* ReactFlow Handle 隐藏 */
 .node-handle { opacity: 0; }
 
+/* ====== 画布面板 ====== */
+
+.canvas-panel {
+  grid-row: 2;
+  position: relative;
+  background: radial-gradient(circle at 40% 30%, rgba(255, 255, 255, 0.025), rgba(10, 10, 10, 0.97));
+}
+
+/* ====== Inspector Panel ====== */
+
+.inspector-panel {
+  height: 100%;
+  overflow: hidden;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  box-sizing: border-box;
+}
+
+.inspector-content {
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.1) transparent;
+}
+
+.panel-title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #d1d5db;
+}
+
+.inspector-group {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #1f2937;
+}
+
+.inspector-label {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-bottom: 4px;
+}
+
+.inspector-value {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.inspector-code {
+  font-size: 11px;
+  font-family: "Consolas", "JetBrains Mono", monospace;
+  color: #cbd5e1;
+  word-break: break-all;
+}
+
+.inspector-empty {
+  display: grid;
+  place-items: center;
+  flex: 1;
+  height: 200px;
+  color: #6b7280;
+  text-align: center;
+  gap: 8px;
+}
+
+.inspector-empty-icon {
+  font-size: 28px;
+  opacity: 0.5;
+}
+
+.inspector-code-block {
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ====== 编排占位区 ====== */
+
+.orchestrate-section {
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid #1f2937;
+  opacity: 0.45;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.orchestrate-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #d1d5db;
+  margin-bottom: 2px;
+}
+
+.orchestrate-btn {
+  width: 100%;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #9ca3af;
+  border-radius: 7px;
+  padding: 7px 10px;
+  font-size: 12px;
+  cursor: not-allowed;
+  font-family: inherit;
+}
+
+.orchestrate-hint {
+  font-size: 11px;
+  color: #4b5563;
+  margin: 0;
+  text-align: center;
+}
+
 /* ── @keyframes ────────────────────────────────────── */
 
 @keyframes blink {
