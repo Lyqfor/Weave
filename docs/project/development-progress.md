@@ -9,6 +9,360 @@
 
 ## 进度记录
 
+### 2026-03-17 - Entry 065 - 修复 /weave on 无节点（插件 this 绑定 + 动态配置读取）
+
+#### 范围
+针对“`/weave on` 下 TUI 未收到节点消息”进行全链路排查（runtime -> plugin -> ui-gateway -> state -> render），并在既有重构基础上做回归修复与验证。
+
+#### 改动
+- 修复插件钩子上下文丢失：
+  - [src/agent/plugin-executor.ts](src/agent/plugin-executor.ts)
+  - `executePluginHook` 从函数引用调用改为 `hook.call(plugin, context)`，确保 `WeavePlugin` 内部 `this.runStates` 可用。
+- 修复运行时配置静态化回归：
+  - [src/config/defaults.ts](src/config/defaults.ts)
+  - 新增 `getDefaultToolRetries()` 与 `getDefaultToolTimeoutMs()` 运行时读取函数。
+  - [src/agent/run-agent.ts](src/agent/run-agent.ts)
+  - 重试与超时逻辑改为调用运行时 getter，避免模块加载时固化环境变量。
+- 文档复盘与任务同步：
+  - [docs/project/optimization-plan-v2.md](docs/project/optimization-plan-v2.md)
+  - 增补本次链路根因，新增并标记完成 OPT-25。
+
+#### 验证
+- 构建通过：`pnpm build`
+- Step Gate 回归通过：`node scripts/verify-step-gate.mjs`
+- DAG 语义回归通过：`node scripts/verify-dag-matrix.mjs`
+- 根因证据来自会话记录：
+  - [sessions/session-session_1773720954447_bf57fd77f6a3.jsonl#L5](sessions/session-session_1773720954447_bf57fd77f6a3.jsonl#L5)
+  - [sessions/session-session_1773720954447_bf57fd77f6a3.jsonl#L7](sessions/session-session_1773720954447_bf57fd77f6a3.jsonl#L7)
+
+#### 待解决问题
+- 目前缺少针对插件钩子调用语义（上下文绑定）的单元测试，存在后续重构回归风险。
+
+#### 下一步
+- 为 `plugin-executor` 增加单测：覆盖 `this` 绑定、空输出、异常路径。
+- 为运行时配置增加单测：覆盖环境变量在运行期变更的场景。
+
+### 2026-03-17 - Entry 064 - Inspector 三态交互 + 高亮懒加载 + stop 日志准确性修复
+
+#### 范围
+在上一轮视觉升级基础上继续优化：为 Inspector 增加摘要/展开/复制三态交互；高亮组件改为按需懒加载；修复 stop 过程中误报 `[ok]` 的日志准确性问题。
+
+#### 改动
+- Inspector 三态交互：
+  - [apps/weave-graph-web/src/App.tsx](apps/weave-graph-web/src/App.tsx)
+  - `renderPortSummary` 升级为 `InspectorTextBlock`。
+  - 支持 `摘要` / `展开` / `复制` 三按钮。
+  - 长文本默认摘要显示，展开后展示完整高亮块。
+- 高亮按需加载：
+  - [apps/weave-graph-web/src/App.tsx](apps/weave-graph-web/src/App.tsx)
+  - 高亮库改为 `import()` 动态加载，仅在用户点击“展开”时加载。
+  - 新增“正在加载高亮...”过渡态。
+- 样式细化：
+  - [apps/weave-graph-web/src/app.css](apps/weave-graph-web/src/app.css)
+  - 新增 Inspector 工具栏按钮样式、激活态、代码块容器样式。
+- stop 日志准确性修复：
+  - [scripts/stop-weave-graph-all.ps1](scripts/stop-weave-graph-all.ps1)
+  - `Stop-ProcessTree` 先校验 PID 是否存在，再执行 `taskkill /T /F`。
+  - 按 `taskkill` 退出码判断成功/失败，避免“未找到进程却打印成功”。
+- 依赖补充：
+  - `react-syntax-highlighter`
+  - `@types/react-syntax-highlighter`
+
+#### 验证
+- 构建验证通过：
+  - `apps/weave-graph-web: pnpm build`
+- stop 行为验证通过：
+  - `pnpm dev:graph:all` 后执行 `pnpm dev:graph:stop`，无残留管理进程。
+
+#### 待解决问题
+- `react-syntax-highlighter` 仍会产生较多语言分片 chunk，后续可改为仅注册 json/bash 轻量语言集进一步瘦身。
+
+#### 下一步
+- 将高亮切换为轻量语言白名单（json/bash/powershell），继续优化包体与加载速度。
+
+### 2026-03-17 - Entry 063 - stop 全终端清理修复 + 赛博曜石视觉升级
+
+#### 范围
+修复 `dev:graph:stop` 不能关闭所有已启动终端/进程的问题；按“赛博曜石”方案重构前端配色、节点、连线与面板观感。
+
+#### 改动
+- 终端/进程清理增强：
+  - [scripts/start-weave-graph-all.ps1](scripts/start-weave-graph-all.ps1)
+  - [scripts/stop-weave-graph-all.ps1](scripts/stop-weave-graph-all.ps1)
+  - 启动时给所有子进程注入 `WEAVE_GRAPH_MANAGED=1` 标记。
+  - stop 使用 `taskkill /T /F` 进行进程树关闭（含子进程）。
+  - stop 增加残留扫描：按命令行特征清理 graph-server / graph-web / graph-cli 残留进程。
+  - 即使 PID 文件丢失也可执行兜底清理。
+- 视觉系统升级（赛博曜石）：
+  - [apps/weave-graph-web/src/app.css](apps/weave-graph-web/src/app.css)
+  - 画布切为曜石黑背景，Dots 点阵增强空间感。
+  - 节点改为“左侧高亮强调线 + 毛玻璃 + 阴影悬浮”风格。
+  - 语义色对齐：LLM 紫、Tool 蓝、Gate 橙、Error/Retry 红、Success 绿。
+  - 时间轴改为克制 hover 高亮，去重边框噪声。
+  - Inspector 增加空状态居中提示样式。
+- 节点与连线语义优化：
+  - [apps/weave-graph-web/src/nodes/semantic-node.tsx](apps/weave-graph-web/src/nodes/semantic-node.tsx)
+  - [apps/weave-graph-web/src/App.tsx](apps/weave-graph-web/src/App.tsx)
+  - 节点图标升级（🧠⚡⏸️✖️✔️）。
+  - 连线默认淡灰，运行中动画蓝，成功绿，失败红。
+- Inspector 代码高亮：
+  - [apps/weave-graph-web/src/App.tsx](apps/weave-graph-web/src/App.tsx)
+  - 引入 `react-syntax-highlighter` 渲染 JSON/长日志。
+  - 依赖：`react-syntax-highlighter`、`@types/react-syntax-highlighter`。
+- 协议语义补强：
+  - [apps/weave-graph-server/src/protocol/graph-events.ts](apps/weave-graph-server/src/protocol/graph-events.ts)
+  - [apps/weave-graph-server/src/projection/graph-projector.ts](apps/weave-graph-server/src/projection/graph-projector.ts)
+  - 新增 `gate` 节点类型推断（Step Gate / 人工拦截/挂起）。
+
+#### 验证
+- stop 全清理验证通过：
+  - `pnpm dev:graph:all` 后执行 `pnpm dev:graph:stop`。
+  - 主 CLI、后端日志窗口、后台服务进程均被关闭。
+  - 残留扫描结果：`MANAGED_LEFT_NONE`。
+- 构建验证通过：
+  - `apps/weave-graph-server: pnpm build`
+  - `apps/weave-graph-web: pnpm build`
+
+#### 待解决问题
+- 代码高亮依赖引入后前端 bundle 体积上升，后续可做懒加载拆包优化。
+
+#### 下一步
+- 对 Inspector 的长日志增加“摘要/展开/复制”三态交互，降低信息负载。
+
+### 2026-03-17 - Entry 062 - 四阶段前端改造完成（Timeline + Inspector + 语义节点 + 布局性能）
+
+#### 范围
+按既定顺序完成并验证 Phase 1 到 Phase 4：多 DAG 管理、详情面板、视觉语义化、布局性能与拖拽锁定。
+
+#### 改动
+- Phase 1（多 DAG 与时间轴）
+  - [apps/weave-graph-web/src/store/graph-store.ts](apps/weave-graph-web/src/store/graph-store.ts)
+  - [apps/weave-graph-web/src/App.tsx](apps/weave-graph-web/src/App.tsx)
+  - 按 `dagId` 分桶存储图数据，左侧 Timeline 支持按轮次切换，中间仅渲染当前 DAG。
+- Phase 2（Inspector 详情抽屉）
+  - [apps/weave-graph-web/src/store/graph-store.ts](apps/weave-graph-web/src/store/graph-store.ts)
+  - [apps/weave-graph-web/src/App.tsx](apps/weave-graph-web/src/App.tsx)
+  - 支持节点选中与右侧详情展示（类型/状态/输入端口/输出端口）。
+- Phase 3（语义节点与美学）
+  - [apps/weave-graph-web/src/nodes/semantic-node.tsx](apps/weave-graph-web/src/nodes/semantic-node.tsx)
+  - [apps/weave-graph-web/src/app.css](apps/weave-graph-web/src/app.css)
+  - [apps/weave-graph-web/src/App.tsx](apps/weave-graph-web/src/App.tsx)
+  - [apps/weave-graph-web/src/store/graph-store.ts](apps/weave-graph-web/src/store/graph-store.ts)
+  - 深色三栏布局、语义配色节点、状态灯、平滑边线、运行中边线动画。
+- Phase 4（布局节流与拖拽锁定）
+  - [apps/weave-graph-web/src/layout/dagre-layout.ts](apps/weave-graph-web/src/layout/dagre-layout.ts)
+  - [apps/weave-graph-web/src/store/graph-store.ts](apps/weave-graph-web/src/store/graph-store.ts)
+  - [apps/weave-graph-web/src/App.tsx](apps/weave-graph-web/src/App.tsx)
+  - 100ms 布局批处理；节点拖动后写入锁定集合，后续自动布局保留人工位置。
+- 配套改动
+  - [apps/weave-graph-web/src/types/graph-events.ts](apps/weave-graph-web/src/types/graph-events.ts)
+  - 新增 `subtitle` 字段用于节点次级信息渲染。
+
+#### 验证
+- 阶段性构建验证全部通过：
+  - 每个 Phase 完成后均执行 `apps/weave-graph-web: pnpm build`。
+- 运行态验证通过：
+  - `pnpm dev:graph:all` 启动成功。
+  - 注入事件后收到 WS 消息，包含 `dagId: s-phase:turn-1`。
+  - 后端事件日志窗口可见并持续输出。
+
+#### 待解决问题
+- 当前 Inspector 已可用，但尚未加入“长日志折叠/展开 + 一键复制 + blob 引用加载”。
+
+#### 下一步
+- 增加 `node.io` 大文本分级展示策略（摘要优先、长文按需加载）。
+
+### 2026-03-17 - Entry 061 - 后端事件日志可视化 + DAG ID 落地 + 左右布局
+
+#### 范围
+响应“后端可见日志”和“每轮问答独立 DAG 标识”诉求，补齐启动可观测性与协议标识，并将画布方向切换为左到右。
+
+#### 改动
+- 启动脚本增强（可观测性）：
+  - [scripts/start-weave-graph-all.ps1](scripts/start-weave-graph-all.ps1)
+  - 启动后自动打开后端日志窗口（tail .run.log），实时看到 `ingest accepted` / `publish` 事件。
+  - 增加启动前预停止与残留进程清理（graph-web + graph-server）。
+  - 日志文件清理改为安全模式（被占用时回退清空）。
+- 停止脚本向后兼容：
+  - [scripts/stop-weave-graph-all.ps1](scripts/stop-weave-graph-all.ps1)
+  - 兼容旧 PID 文件不存在 `backendLogPid` 字段的情况。
+- 协议与投影新增 DAG ID：
+  - [apps/weave-graph-server/src/protocol/graph-events.ts](apps/weave-graph-server/src/protocol/graph-events.ts)
+  - [apps/weave-graph-server/src/projection/graph-projector.ts](apps/weave-graph-server/src/projection/graph-projector.ts)
+  - 规则：`dagId = sessionId:turn-{turnIndex}`，若缺失则回退 `runId`。
+  - 所有 envelope 附带 `dagId`，`run.start.payload` 也附带 `dagId`。
+- 前端类型与状态同步：
+  - [apps/weave-graph-web/src/types/graph-events.ts](apps/weave-graph-web/src/types/graph-events.ts)
+  - [apps/weave-graph-web/src/store/graph-store.ts](apps/weave-graph-web/src/store/graph-store.ts)
+  - Store 新增 `dagId`，按 envelope 同步当前 DAG。
+- 画布方向切换为左到右：
+  - [apps/weave-graph-web/src/App.tsx](apps/weave-graph-web/src/App.tsx)
+  - Dagre `TB` 改为 `LR`。
+
+#### 影响文件
+- scripts/start-weave-graph-all.ps1
+- scripts/stop-weave-graph-all.ps1
+- apps/weave-graph-server/src/protocol/graph-events.ts
+- apps/weave-graph-server/src/projection/graph-projector.ts
+- apps/weave-graph-web/src/types/graph-events.ts
+- apps/weave-graph-web/src/store/graph-store.ts
+- apps/weave-graph-web/src/App.tsx
+- apps/weave-graph-web/src/types/dagre.d.ts
+
+#### 验证
+- 启动验证通过：`pnpm dev:graph:all` 成功，后端日志窗口自动打开。
+- 协议验证通过：WS 消息出现 `dagId`，示例 `sess-1:turn-3`。
+- 构建验证通过：
+  - `apps/weave-graph-server: pnpm build`
+  - `apps/weave-graph-web: pnpm build`
+
+#### 待解决问题
+- 当前前端仍是“单画布视图”，尚未实现左侧多轮会话时间轴与右侧 Inspector。
+
+#### 下一步
+- 进入三栏式 UI 改造：Timeline（按 dagId 列表）+ Canvas（当前 DAG）+ Inspector（节点详情抽屉）。
+
+### 2026-03-17 - Entry 060 - 修复主 CLI 无交互问题（空终端）
+
+#### 范围
+修复 `dev:graph:all` 启动后“后端窗口空白、无法交互”的问题，明确区分后台服务与交互入口。
+
+#### 改动
+- 调整三服务窗口策略：
+  - `scripts/start-weave-graph-all.ps1`
+  - 图后端、图前端改为隐藏窗口后台运行（保留日志文件）。
+  - 主 CLI 改为可见窗口启动，并使用 `-NoExit` 保持交互终端。
+- 调整主 CLI 启动命令：
+  - 取消输出重定向到日志文件，恢复实时交互输入输出。
+  - 保留 `WEAVE_GRAPH_INGEST_URL` 与 `WEAVE_GRAPH_TOKEN` 环境变量注入。
+  - 在 CLI 窗口启动时打印交互提示文案。
+- 启动结果文案更新：
+  - 增加 `main CLI interaction: opened in a new PowerShell window`，避免误解为空白后端窗口。
+
+#### 影响文件
+- scripts/start-weave-graph-all.ps1
+
+#### 验证
+- 执行 `pnpm dev:graph:all` 成功。
+- 启动输出包含“主 CLI 在新窗口交互”提示。
+- 三进程均存活：graph-backend / graph-frontend / main-cli。
+- 图前端 URL 可访问（HTTP 200）。
+
+#### 待解决问题
+- 目前主 CLI 为独立窗口交互；若后续需要“当前终端内交互”模式，可再加一个 `dev:graph:attach` 方案。
+
+#### 下一步
+- 增加可选参数（interactive/background）以支持两种启动方式切换。
+
+### 2026-03-17 - Entry 059 - 修复“前端在、后端不在”的假启动成功问题
+
+#### 范围
+修复 `dev:graph:all` 在存在历史残留进程时的误判问题：页面能打开但新启动链路不完整，表现为“前端看起来在，两个后端没起来”。
+
+#### 改动
+- 启动前残留进程清理：
+  - `scripts/start-weave-graph-all.ps1`
+  - 增加对 `apps/weave-graph-web + vite` 历史进程的识别和清理，避免 5173 被旧进程占用。
+- 启动过程存活校验增强：
+  - 图后端 token/port 解析等待期间，新增“后端进程仍存活”校验，异常立即失败。
+  - 图前端就绪等待期间，新增“前端进程仍存活”校验，避免被旧 5173 响应误判为成功。
+- 启动后稳定性校验：
+  - 主 CLI 拉起后新增 2 秒健康检查，三进程任一提前退出即报错。
+
+#### 影响文件
+- scripts/start-weave-graph-all.ps1
+
+#### 验证
+- 启动日志显示清理残留成功：`[cleanup] stopped stale graph-web process`。
+- 三进程存活验证通过：graph-backend / graph-frontend / main-cli 均 `RUNNING`。
+- 页面与后端接口验证通过：
+  - `graphWebUrl` 返回 `200`
+  - `POST ingest` 返回 `202`
+- WS 实时链路验证通过：
+  - `WS_OPEN`
+  - 收到 `weave.graph.v1 run.start` 广播消息
+
+#### 待解决问题
+- 当前清理策略聚焦 graph-web 残留；后续可补一版 `dev:graph:doctor` 输出更完整冲突诊断信息。
+
+#### 下一步
+- 增加 `dev:graph:status`/`dev:graph:doctor` 脚本，一键打印进程、端口、URL、WS 四维健康状态。
+
+### 2026-03-17 - Entry 058 - 修复 dev:graph:all 启动后页面不可访问
+
+#### 范围
+修复 `pnpm dev:graph:all` 启动后浏览器访问 `127.0.0.1:5173` 失败的问题，并完成端到端复测。
+
+#### 改动
+- 修复启动脚本前端绑定地址：
+  - `scripts/start-weave-graph-all.ps1`
+  - 图前端启动命令改为：`pnpm dev -- --host 127.0.0.1 --port 5173 --strictPort`
+  - 避免 Vite 仅监听 `localhost/::1` 导致 `127.0.0.1` 无法访问。
+- 增加前端就绪探测：
+  - 启动后轮询 `http://127.0.0.1:5173/`，就绪后再继续后续流程。
+  - 超时直接报错，避免“启动成功但不可访问”的假阳性。
+- 启动进程窗口处理：
+  - 三个子进程统一 `-WindowStyle Hidden` 启动，避免出现空白终端窗口干扰。
+
+#### 影响文件
+- scripts/start-weave-graph-all.ps1
+
+#### 验证
+- `pnpm dev:graph:all` 执行成功，输出 graph URL/token。
+- 页面可访问验证通过：
+  - `Invoke-WebRequest <graphWebUrl>` 返回 `200`。
+- 端口监听验证通过：
+  - `127.0.0.1:5173`（图前端）
+  - `127.0.0.1:<graph-port>`（图后端）
+- WS 实时链路验证通过：
+  - `WS_OPEN` 后收到 `weave.graph.v1 run.start` 广播消息。
+
+#### 待解决问题
+- 仍可能存在历史遗留 `vite` 进程占用 `::1:5173` 的情况，建议先执行一次 `pnpm dev:graph:stop` 再启动。
+
+#### 下一步
+- 增加 `dev:graph:status` 健康检查脚本，统一输出“进程/端口/URL/WS”四项状态。
+
+### 2026-03-17 - Entry 057 - 图链路连通性验收（真实 CLI 事件）
+
+#### 范围
+对三服务一键启动链路做端到端验收，确认不只“手工注入可通”，还可接收真实主 CLI Runtime 事件。
+
+#### 改动
+- 联调与可观测性修复落地并复验：
+  - `scripts/start-weave-graph-all.ps1`
+  - `scripts/stop-weave-graph-all.ps1`
+  - `apps/weave-graph-server/src/gateway/ws-gateway.ts`
+- 验证路径补强：
+  - 先验证三服务 PID 持活与 URL/token 产出；
+  - 再做 `ingest -> ws` 直连验证；
+  - 最后执行真实 `pnpm dev -- "ls -a"`，检查图后端与转发器日志中的事件落库与广播。
+
+#### 影响文件
+- scripts/start-weave-graph-all.ps1
+- scripts/stop-weave-graph-all.ps1
+- apps/weave-graph-server/src/gateway/ws-gateway.ts
+- logs/runtime/graph-cli-forwarder.log
+- apps/weave-graph-server/.run.log
+
+#### 验证
+- 三服务启动与持活验证通过：
+  - `pnpm dev:graph:all` 后 PID 文件存在，三个进程均 `RUNNING`。
+- ingest -> ws 广播验证通过：
+  - WS 客户端收到 `weave.graph.v1` 的 `run.start` 消息。
+- 真实 CLI 事件转发验证通过：
+  - 执行 `pnpm dev -- "ls -a"` 后，图后端日志出现：
+    - `ingest accepted type=run.start`
+    - `ingest accepted type=tool.execution.start/end`
+    - `ingest accepted type=llm.request/llm.delta/llm.completed`
+    - `ingest accepted type=run.completed`
+
+#### 待解决问题
+- 目前已证明链路可通，但“前端图层可视化细节（端口卡片/布局节流）”仍待继续增强。
+
+#### 下一步
+- 增加自动 smoke 脚本：一键启动后自动发起一次真实 CLI turn，并断言 WS 收到关键事件集合。
+
 ### 2026-03-16 - Entry 056 - 启动流程验证与三服务一键启停脚本
 
 #### 范围

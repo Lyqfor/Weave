@@ -8,12 +8,6 @@ import type { ToolExecuteResult } from "../tools/tool-types.js";
 import { createRuntimeRunner, type RunnerMode } from "../runtime/runner-selector.js";
 import { DagExecutionGraph } from "../runtime/dag-graph.js";
 import { DagStateStore } from "../runtime/state-store.js";
-import {
-  createDagEventEnvelope,
-  type DagNodeDetailPayload,
-  type DagNodeTransitionPayload,
-  type DagSchedulerIssuePayload
-} from "../runtime/dag-event-contract.js";
 import type {
   AgentRunner,
   RunOnceStreamOptions,
@@ -27,6 +21,41 @@ import type {
   AgentPluginOutput,
   AgentPluginRunContext
 } from "./plugins/agent-plugin.js";
+import { summarizeText, tryParseJson, safeJsonStringify } from "../utils/text-utils.js";
+import { extractErrorMessage } from "../errors/agent-errors.js";
+import {
+  MAX_AGENT_STEPS,
+  getDefaultToolRetries,
+  getDefaultToolTimeoutMs
+} from "../config/defaults.js";
+import {
+  executeOnRunStart,
+  executeOnRunCompleted,
+  executeOnRunError,
+  executeBeforeLlmRequest,
+  executeAfterLlmResponse,
+  executeBeforeToolExecution,
+  executeAfterToolExecution
+} from "./plugin-executor.js";
+import {
+  deriveToolIntent,
+  attachIntentToToolArgs,
+  extractRuntimeToolMeta,
+  stripRuntimeToolMeta,
+  executeToolWithTimeout as executeToolWithTimeoutFn,
+  extractJsonObject,
+  repairToolArgsByIntent,
+  type ToolIntentInfo,
+  type ToolRetryTicket,
+  type ToolRepairResult
+} from "./tool-executor.js";
+import {
+  emitDagNodeTransition,
+  emitWeaveDagNode,
+  emitWeaveDagDetail,
+  emitDagNodeDetail,
+  emitDagSchedulerIssue
+} from "./weave-emitter.js";
 
 /**
  * 文件作用：提供 Agent 运行时最小抽象，承接上层输入并调用 LLM 客户端生成回复。
@@ -82,23 +111,6 @@ interface StepGateOptions {
   enabled: boolean;
   autoMode?: boolean;
   approveToolCall?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
-}
-
-interface ToolIntentInfo {
-  summary: string;
-  goal: string;
-}
-
-interface ToolRetryTicket {
-  toolName: string;
-  intentSummary: string;
-  previousArgs: unknown;
-  lastResult: string;
-}
-
-interface ToolRepairResult {
-  repairedArgs: Record<string, unknown> | null;
-  llmOutput: string;
 }
 
 export class AgentRuntime extends EventEmitter {
@@ -193,22 +205,33 @@ export class AgentRuntime extends EventEmitter {
     return await runner.run({ userInput, options });
   }
 
-  private async runOnceStreamLegacy(
+  /**
+   * 公共流式执行框架：setup → 核心循环 → 收尾/错误处理。
+   * Legacy 和 DAG 两条路径仅在核心循环实现上不同。
+   */
+  private async runOnceStreamCommon(
     userInput: string,
-    options?: RunOnceStreamOptions
+    mode: "legacy" | "dag",
+    options: RunOnceStreamOptions | undefined,
+    coreLoop: (ctx: {
+      runId: string;
+      composedSystemPrompt: string;
+      plugins: AgentLoopPlugin[];
+      basePluginContext: AgentPluginRunContext;
+      stepGate: StepGateOptions;
+    }) => Promise<string>
   ): Promise<string> {
-    // 使用 runId 串联一轮执行中全部事件，便于后续观测、回放和排障。
     const runId = this.createRunId();
     this.turnIndex += 1;
+    const modeLabel = mode === "dag" ? "DAG " : "";
 
-    this.logger.info("run.stream.start", "开始执行流式调用", {
+    this.logger.info("run.stream.start", `开始执行${modeLabel}流式调用`, {
       runId,
       sessionId: this.sessionId,
       turnIndex: this.turnIndex,
       userInputLength: userInput.length
     });
 
-    // 发布运行开始事件，通知上层进入处理态。
     this.emitRunEvent({
       type: "run.start",
       runId,
@@ -216,7 +239,6 @@ export class AgentRuntime extends EventEmitter {
       payload: { userInput, sessionId: this.sessionId, turnIndex: this.turnIndex }
     });
 
-    // 发布 LLM 请求事件，标记模型调用阶段开始。
     this.emitRunEvent({
       type: "llm.request",
       runId,
@@ -233,29 +255,21 @@ export class AgentRuntime extends EventEmitter {
         userInput
       };
 
-      for (const plugin of plugins) {
-        const output = await plugin.onRunStart?.(basePluginContext);
-        this.emitPluginOutput(runId, output);
-      }
+      await executeOnRunStart(plugins, basePluginContext, runId, this.emitPluginOutput.bind(this));
 
-      // 将基础提示词与文件化记忆拼装后注入模型。
       const composedSystemPrompt = this.memoryStore.buildSystemPrompt(this.llmConfig.systemPrompt);
-
-      // 使用 Agent loop，支持模型按需触发工具调用并观察工具结果后继续推理。
-      const finalText = await this.runAgentLoop(
+      const finalText = await coreLoop({
         runId,
-        userInput,
         composedSystemPrompt,
         plugins,
         basePluginContext,
-        {
+        stepGate: {
           enabled: options?.stepMode === true,
           autoMode: options?.autoMode === true,
           approveToolCall: options?.approveToolCall
         }
-      );
+      });
 
-      // 流式完成后写入多轮历史，为下一轮提供上下文。
       this.historyMessages.push({ role: "user", content: userInput });
       this.historyMessages.push({ role: "assistant", content: finalText });
 
@@ -273,25 +287,18 @@ export class AgentRuntime extends EventEmitter {
         payload: { finalText, sessionId: this.sessionId, turnIndex: this.turnIndex }
       });
 
-      this.logger.info("run.stream.completed", "流式调用完成", {
+      this.logger.info("run.stream.completed", `${modeLabel}流式调用完成`, {
         runId,
         sessionId: this.sessionId,
         turnIndex: this.turnIndex,
         responseLength: finalText.length
       });
 
-      // 运行结束后触发插件输出（如 Weave DAG 渲染结果）。
-      for (const plugin of plugins) {
-        const output = await plugin.onRunCompleted?.({
-          ...basePluginContext,
-          finalText
-        });
-        this.emitPluginOutput(runId, output);
-      }
+      await executeOnRunCompleted(plugins, { ...basePluginContext, finalText }, runId, this.emitPluginOutput.bind(this));
 
       return finalText;
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorMessage = extractErrorMessage(error);
       const plugins = options?.plugins ?? [];
       const basePluginContext: AgentPluginRunContext = {
         runId,
@@ -300,15 +307,9 @@ export class AgentRuntime extends EventEmitter {
         userInput
       };
 
-      for (const plugin of plugins) {
-        const output = await plugin.onRunError?.({
-          ...basePluginContext,
-          errorMessage
-        });
-        this.emitPluginOutput(runId, output);
-      }
+      await executeOnRunError(plugins, { ...basePluginContext, errorMessage }, runId, this.emitPluginOutput.bind(this));
 
-      this.logger.error("run.stream.error", "流式调用失败", {
+      this.logger.error("run.stream.error", `${modeLabel}流式调用失败`, {
         runId,
         sessionId: this.sessionId,
         turnIndex: this.turnIndex,
@@ -324,127 +325,28 @@ export class AgentRuntime extends EventEmitter {
     }
   }
 
+  private async runOnceStreamLegacy(
+    userInput: string,
+    options?: RunOnceStreamOptions
+  ): Promise<string> {
+    return this.runOnceStreamCommon(userInput, "legacy", options, (ctx) =>
+      this.runAgentLoop(
+        ctx.runId, userInput, ctx.composedSystemPrompt,
+        ctx.plugins, ctx.basePluginContext, ctx.stepGate
+      )
+    );
+  }
+
   private async runOnceStreamDag(
     userInput: string,
     options?: RunOnceStreamOptions
   ): Promise<string> {
-    const runId = this.createRunId();
-    this.turnIndex += 1;
-
-    this.logger.info("run.stream.start", "开始执行 DAG 流式调用", {
-      runId,
-      sessionId: this.sessionId,
-      turnIndex: this.turnIndex,
-      userInputLength: userInput.length
-    });
-
-    this.emitRunEvent({
-      type: "run.start",
-      runId,
-      timestamp: new Date().toISOString(),
-      payload: { userInput, sessionId: this.sessionId, turnIndex: this.turnIndex }
-    });
-
-    this.emitRunEvent({
-      type: "llm.request",
-      runId,
-      timestamp: new Date().toISOString(),
-      payload: { userInput, sessionId: this.sessionId, turnIndex: this.turnIndex }
-    });
-
-    try {
-      const plugins = options?.plugins ?? [];
-      const basePluginContext: AgentPluginRunContext = {
-        runId,
-        sessionId: this.sessionId,
-        turnIndex: this.turnIndex,
-        userInput
-      };
-
-      for (const plugin of plugins) {
-        const output = await plugin.onRunStart?.(basePluginContext);
-        this.emitPluginOutput(runId, output);
-      }
-
-      const composedSystemPrompt = this.memoryStore.buildSystemPrompt(this.llmConfig.systemPrompt);
-      const finalText = await this.runAgentDagLoop(
-        runId,
-        userInput,
-        composedSystemPrompt,
-        plugins,
-        basePluginContext,
-        {
-          enabled: options?.stepMode === true,
-          autoMode: options?.autoMode === true,
-          approveToolCall: options?.approveToolCall
-        }
-      );
-
-      this.historyMessages.push({ role: "user", content: userInput });
-      this.historyMessages.push({ role: "assistant", content: finalText });
-
-      this.emitRunEvent({
-        type: "llm.completed",
-        runId,
-        timestamp: new Date().toISOString(),
-        payload: { finalText, sessionId: this.sessionId, turnIndex: this.turnIndex }
-      });
-
-      this.emitRunEvent({
-        type: "run.completed",
-        runId,
-        timestamp: new Date().toISOString(),
-        payload: { finalText, sessionId: this.sessionId, turnIndex: this.turnIndex }
-      });
-
-      this.logger.info("run.stream.completed", "DAG 流式调用完成", {
-        runId,
-        sessionId: this.sessionId,
-        turnIndex: this.turnIndex,
-        responseLength: finalText.length
-      });
-
-      for (const plugin of plugins) {
-        const output = await plugin.onRunCompleted?.({
-          ...basePluginContext,
-          finalText
-        });
-        this.emitPluginOutput(runId, output);
-      }
-
-      return finalText;
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const plugins = options?.plugins ?? [];
-      const basePluginContext: AgentPluginRunContext = {
-        runId,
-        sessionId: this.sessionId,
-        turnIndex: this.turnIndex,
-        userInput
-      };
-
-      for (const plugin of plugins) {
-        const output = await plugin.onRunError?.({
-          ...basePluginContext,
-          errorMessage
-        });
-        this.emitPluginOutput(runId, output);
-      }
-
-      this.logger.error("run.stream.error", "DAG 流式调用失败", {
-        runId,
-        sessionId: this.sessionId,
-        turnIndex: this.turnIndex,
-        errorMessage
-      });
-      this.emitRunEvent({
-        type: "run.error",
-        runId,
-        timestamp: new Date().toISOString(),
-        payload: { errorMessage, sessionId: this.sessionId, turnIndex: this.turnIndex }
-      });
-      throw error;
-    }
+    return this.runOnceStreamCommon(userInput, "dag", options, (ctx) =>
+      this.runAgentDagLoop(
+        ctx.runId, userInput, ctx.composedSystemPrompt,
+        ctx.plugins, ctx.basePluginContext, ctx.stepGate
+      )
+    );
   }
 
   private async runAgentDagLoop(
@@ -471,9 +373,9 @@ export class AgentRuntime extends EventEmitter {
       text: string;
     };
 
-    const maxSteps = 6;
-    const defaultToolRetries = stepGate.autoMode === true ? Number(process.env.WEAVE_DAG_TOOL_RETRIES ?? "1") : 0;
-    const defaultToolTimeoutMs = Number(process.env.WEAVE_DAG_TOOL_TIMEOUT_MS ?? "15000");
+    const maxSteps = MAX_AGENT_STEPS;
+    const defaultToolRetries = stepGate.autoMode === true ? getDefaultToolRetries() : 0;
+    const defaultToolTimeoutMs = getDefaultToolTimeoutMs();
     const modelTools = this.toolRegistry.listModelTools();
     const graph = new DagExecutionGraph();
     const stateStore = new DagStateStore();
@@ -491,13 +393,13 @@ export class AgentRuntime extends EventEmitter {
     const transitionNode = (nodeId: string, toStatus: "ready" | "running" | "blocked" | "success" | "fail" | "skipped" | "aborted", reason?: string): void => {
       const nodeBefore = graph.getNode(nodeId);
       const transition = graph.transitionStatus(nodeId, toStatus, reason);
-      this.emitDagNodeTransitionEvent(runId, {
+      emitDagNodeTransition(runId, {
         nodeId,
         nodeType: nodeBefore.type,
         fromStatus: transition.fromStatus,
         toStatus: transition.toStatus,
         reason: transition.reason
-      });
+      }, this.emitPluginOutput.bind(this));
     };
 
     const addLlmNode = (step: number, dependsOnNodeIds: string[] = []): string => {
@@ -530,10 +432,10 @@ export class AgentRuntime extends EventEmitter {
       const readyNodeIds = graph.getReadyNodeIds().sort();
       if (readyNodeIds.length === 0) {
         const remainingNodeIds = graph.getInProgressNodeIds();
-        this.emitDagSchedulerIssueEvent(runId, "dag.scheduler.deadlock", {
+        emitDagSchedulerIssue(runId, "dag.scheduler.deadlock", {
           message: "DAG 调度死锁：存在未完成节点但无可执行 ready 节点",
           remainingNodeIds
-        });
+        }, this.emitPluginOutput.bind(this));
         throw new Error("DAG 调度死锁：存在未完成节点但无可执行 ready 节点");
       }
 
@@ -628,8 +530,8 @@ export class AgentRuntime extends EventEmitter {
         const toolNodeIds: string[] = [];
         for (let index = 0; index < toolCalls.length; index += 1) {
           const toolCall = toolCalls[index];
-          const parsedToolArgs = this.tryParseJson(toolCall.function.arguments || "{}");
-          const intent = this.deriveToolIntentFromAssistant(
+          const parsedToolArgs = tryParseJson(toolCall.function.arguments || "{}") ?? {};
+          const intent = deriveToolIntent(
             assistantMessage.content,
             toolCall.function.name,
             parsedToolArgs,
@@ -648,7 +550,7 @@ export class AgentRuntime extends EventEmitter {
               toolName: toolCall.function.name,
               intentSummary: intent.summary,
               toolGoal: intent.goal,
-              rawArgsText: this.safeJsonStringify(this.attachIntentToToolArgs(parsedToolArgs, intent)),
+              rawArgsText: safeJsonStringify(attachIntentToToolArgs(parsedToolArgs, intent)),
               maxRetries: defaultToolRetries,
               timeoutMs: defaultToolTimeoutMs
             } satisfies ToolNodePayload
@@ -698,8 +600,8 @@ export class AgentRuntime extends EventEmitter {
         const dagInput = stateStore.resolveNodeInput(graph, currentNodeId);
         stateStore.setRunValue(`${currentNodeId}.input`, dagInput);
 
-        const parsedArgs = this.tryParseJson(payload.rawArgsText || "{}");
-        const runtimeMeta = this.extractRuntimeToolMeta(parsedArgs);
+        const parsedArgs = tryParseJson(payload.rawArgsText || "{}") ?? {};
+        const runtimeMeta = extractRuntimeToolMeta(parsedArgs);
         const intentSummary = runtimeMeta.intentSummary || payload.intentSummary;
         const toolGoal = runtimeMeta.toolGoal || payload.toolGoal;
 
@@ -707,16 +609,16 @@ export class AgentRuntime extends EventEmitter {
         let skipByApproval = false;
 
         if (intentSummary) {
-          this.emitDagNodeDetailEvent(runId, {
+          emitDagNodeDetail(runId, {
             nodeId: detailNodeId,
             text: `intent=${intentSummary}`
-          });
+          }, this.emitPluginOutput.bind(this));
         }
         if (toolGoal) {
-          this.emitDagNodeDetailEvent(runId, {
+          emitDagNodeDetail(runId, {
             nodeId: detailNodeId,
             text: `goal=${toolGoal}`
-          });
+          }, this.emitPluginOutput.bind(this));
         }
 
         if (stepGate.enabled && stepGate.approveToolCall) {
@@ -730,8 +632,8 @@ export class AgentRuntime extends EventEmitter {
               turnIndex: this.turnIndex,
               toolName: payload.toolName,
               toolCallId: payload.toolCallId,
-              toolArgsText: this.summarizeForEvent(parsedArgs),
-              toolArgsJsonText: this.safeJsonStringify(parsedArgs)
+              toolArgsText: summarizeText(parsedArgs),
+              toolArgsJsonText: safeJsonStringify(parsedArgs)
             }
           });
 
@@ -741,7 +643,7 @@ export class AgentRuntime extends EventEmitter {
             toolName: payload.toolName,
             toolCallId: payload.toolCallId,
             args: parsedArgs,
-            argsText: this.safeJsonStringify(parsedArgs)
+            argsText: safeJsonStringify(parsedArgs)
           });
 
           if (decision.action === "abort") {
@@ -782,8 +684,8 @@ export class AgentRuntime extends EventEmitter {
               toolName: payload.toolName,
               toolCallId: payload.toolCallId,
               approvalAction: decision.action,
-              toolArgsText: this.summarizeForEvent(effectiveArgs),
-              toolArgsJsonText: this.safeJsonStringify(effectiveArgs)
+              toolArgsText: summarizeText(effectiveArgs),
+              toolArgsJsonText: safeJsonStringify(effectiveArgs)
             }
           });
 
@@ -812,8 +714,8 @@ export class AgentRuntime extends EventEmitter {
             turnIndex: this.turnIndex,
             toolName: payload.toolName,
             toolCallId: payload.toolCallId,
-            toolArgsText: this.summarizeForEvent(effectiveArgs),
-            toolArgsJsonText: this.safeJsonStringify(effectiveArgs)
+            toolArgsText: summarizeText(effectiveArgs),
+            toolArgsJsonText: safeJsonStringify(effectiveArgs)
           }
         });
 
@@ -840,52 +742,53 @@ export class AgentRuntime extends EventEmitter {
           attempt += 1;
           const attemptNodeId = `${detailNodeId}.${attempt * 2 - 1}`;
           const attemptLabel = attempt === 1 ? `工具执行尝试 #${attempt}` : `自动重试执行 #${attempt}`;
-          this.emitWeaveDagNodeEvent(runId, {
+          emitWeaveDagNode(runId, {
             nodeId: attemptNodeId,
             parentId: detailNodeId,
             label: attemptLabel,
             status: "running"
-          });
-          this.emitWeaveDagDetailEvent(runId, {
+          }, this.emitPluginOutput.bind(this));
+          emitWeaveDagDetail(runId, {
             nodeId: attemptNodeId,
             text: `attempt=${attempt}/${totalAttempts}`
-          });
+          }, this.emitPluginOutput.bind(this));
 
           const attemptStartedAt = Date.now();
-          result = await this.executeToolWithTimeout(
-            payload.toolName,
-            effectiveArgs,
-            payload.timeoutMs,
+          result = await executeToolWithTimeoutFn(this.toolRegistry, {
+            toolName: payload.toolName,
+            args: effectiveArgs,
+            timeoutMs: payload.timeoutMs,
             runId,
             step,
-            payload.toolCallId
-          );
+            toolCallId: payload.toolCallId,
+            sessionId: this.sessionId
+          }, this.logger);
           const attemptElapsedMs = Math.max(0, Date.now() - attemptStartedAt);
 
           if (result.ok) {
-            this.emitWeaveDagNodeEvent(runId, {
+            emitWeaveDagNode(runId, {
               nodeId: attemptNodeId,
               parentId: detailNodeId,
               label: attemptLabel,
               status: "success"
-            });
-            this.emitWeaveDagDetailEvent(runId, {
+            }, this.emitPluginOutput.bind(this));
+            emitWeaveDagDetail(runId, {
               nodeId: attemptNodeId,
-              text: `ok elapsed=${attemptElapsedMs}ms result=${this.summarizeForEvent(result.content, 160)}`
-            });
+              text: `ok elapsed=${attemptElapsedMs}ms result=${summarizeText(result.content, 160)}`
+            }, this.emitPluginOutput.bind(this));
             break;
           }
 
-          this.emitWeaveDagNodeEvent(runId, {
+          emitWeaveDagNode(runId, {
             nodeId: attemptNodeId,
             parentId: detailNodeId,
             label: attemptLabel,
             status: "fail"
-          });
-          this.emitWeaveDagDetailEvent(runId, {
+          }, this.emitPluginOutput.bind(this));
+          emitWeaveDagDetail(runId, {
             nodeId: attemptNodeId,
-            text: `fail elapsed=${attemptElapsedMs}ms reason=${this.summarizeForEvent(result.content, 160)}`
-          });
+            text: `fail elapsed=${attemptElapsedMs}ms reason=${summarizeText(result.content, 160)}`
+          }, this.emitPluginOutput.bind(this));
 
           if (attempt <= payload.maxRetries) {
             this.emitRunEvent({
@@ -899,47 +802,47 @@ export class AgentRuntime extends EventEmitter {
                 toolCallId: payload.toolCallId,
                 retryAttempt: attempt,
                 retryMax: payload.maxRetries,
-                retryReason: this.summarizeForEvent(result.content)
+                retryReason: summarizeText(result.content)
               }
             });
 
             const repairNodeId = `${detailNodeId}.${attempt * 2}`;
-            this.emitWeaveDagNodeEvent(runId, {
+            emitWeaveDagNode(runId, {
               nodeId: repairNodeId,
               parentId: detailNodeId,
               label: `局部修复参数 #${attempt}`,
               status: "running"
-            });
+            }, this.emitPluginOutput.bind(this));
             const repairTicket: ToolRetryTicket = {
               toolName: payload.toolName,
               intentSummary,
-              previousArgs: this.stripRuntimeToolMeta(effectiveArgs),
-              lastResult: this.summarizeForEvent(result.content, 300)
+              previousArgs: stripRuntimeToolMeta(effectiveArgs),
+              lastResult: summarizeText(result.content, 300)
             };
-            const repairResult = await this.repairToolArgsByIntent(repairTicket, this.memoryStore.buildSystemPrompt(this.llmConfig.systemPrompt));
+            const repairResult = await repairToolArgsByIntent(repairTicket, this.memoryStore.buildSystemPrompt(this.llmConfig.systemPrompt), (input) => this.invokeLlmText(input));
             if (repairResult.repairedArgs) {
-              effectiveArgs = this.attachIntentToToolArgs(repairResult.repairedArgs, {
+              effectiveArgs = attachIntentToToolArgs(repairResult.repairedArgs, {
                 summary: intentSummary,
                 goal: toolGoal
               });
             }
 
-            this.emitWeaveDagNodeEvent(runId, {
+            emitWeaveDagNode(runId, {
               nodeId: repairNodeId,
               parentId: detailNodeId,
               label: `局部修复参数 #${attempt}`,
               status: "success"
-            });
-            this.emitWeaveDagDetailEvent(runId, {
+            }, this.emitPluginOutput.bind(this));
+            emitWeaveDagDetail(runId, {
               nodeId: repairNodeId,
-              text: `llm_output=${this.summarizeForEvent(repairResult.llmOutput, 200)}`
-            });
-            this.emitWeaveDagDetailEvent(runId, {
+              text: `llm_output=${summarizeText(repairResult.llmOutput, 200)}`
+            }, this.emitPluginOutput.bind(this));
+            emitWeaveDagDetail(runId, {
               nodeId: repairNodeId,
               text: repairResult.repairedArgs
-                ? `repaired_args=${this.safeJsonStringify(this.stripRuntimeToolMeta(repairResult.repairedArgs))}`
-                : `repaired_args=${this.safeJsonStringify(this.stripRuntimeToolMeta(effectiveArgs))}`
-            });
+                ? `repaired_args=${safeJsonStringify(stripRuntimeToolMeta(repairResult.repairedArgs))}`
+                : `repaired_args=${safeJsonStringify(stripRuntimeToolMeta(effectiveArgs))}`
+            }, this.emitPluginOutput.bind(this));
 
             this.emitRunEvent({
               type: "tool.retry.end",
@@ -956,10 +859,10 @@ export class AgentRuntime extends EventEmitter {
               }
             });
 
-            this.emitDagNodeDetailEvent(runId, {
+            emitDagNodeDetail(runId, {
               nodeId: detailNodeId,
               text: `retries=${attempt}/${payload.maxRetries} ${repairResult.repairedArgs ? "args=updated" : "args=unchanged"}`
-            });
+            }, this.emitPluginOutput.bind(this));
           }
         }
 
@@ -1004,7 +907,7 @@ export class AgentRuntime extends EventEmitter {
             toolCallId: payload.toolCallId,
             toolOk: result.ok,
             toolStatus: result.ok ? "success" : "fail",
-            toolResultText: this.summarizeForEvent(result.content)
+            toolResultText: summarizeText(result.content)
           }
         });
 
@@ -1067,7 +970,7 @@ export class AgentRuntime extends EventEmitter {
     stepGate: StepGateOptions
   ): Promise<string> {
     // 每轮最多执行 maxSteps 次，防止模型和工具之间出现无限循环。
-    const maxSteps = 6;
+    const maxSteps = MAX_AGENT_STEPS;
     const modelTools = this.toolRegistry.listModelTools();
 
     // 构建本轮工作消息：历史用户/助手对话 + 本轮用户输入。
@@ -1141,15 +1044,15 @@ export class AgentRuntime extends EventEmitter {
       // 逐个执行工具；工具结果回填给模型继续推理。
       for (const toolCall of toolCalls) {
         const toolName = toolCall.function.name;
-        const toolIntent = this.deriveToolIntentFromAssistant(
+        const toolIntent = deriveToolIntent(
           assistantMessage.content,
           toolName,
-          this.tryParseJson(toolCall.function.arguments || "{}"),
+          tryParseJson(toolCall.function.arguments || "{}") ?? {},
           userInput
         );
 
-        const parsedArgs: unknown = this.attachIntentToToolArgs(
-          this.tryParseJson(toolCall.function.arguments || "{}"),
+        const parsedArgs: unknown = attachIntentToToolArgs(
+          tryParseJson(toolCall.function.arguments || "{}") ?? {},
           toolIntent
         );
 
@@ -1165,8 +1068,8 @@ export class AgentRuntime extends EventEmitter {
               turnIndex: this.turnIndex,
               toolName,
               toolCallId: toolCall.id,
-              toolArgsText: this.summarizeForEvent(parsedArgs),
-              toolArgsJsonText: this.safeJsonStringify(parsedArgs)
+              toolArgsText: summarizeText(parsedArgs),
+              toolArgsJsonText: safeJsonStringify(parsedArgs)
             }
           });
 
@@ -1176,7 +1079,7 @@ export class AgentRuntime extends EventEmitter {
             toolName,
             toolCallId: toolCall.id,
             args: parsedArgs,
-            argsText: this.safeJsonStringify(parsedArgs)
+            argsText: safeJsonStringify(parsedArgs)
           });
 
           if (decision.action === "abort") {
@@ -1216,8 +1119,8 @@ export class AgentRuntime extends EventEmitter {
               toolName,
               toolCallId: toolCall.id,
               approvalAction: decision.action,
-              toolArgsText: this.summarizeForEvent(effectiveArgs),
-              toolArgsJsonText: this.safeJsonStringify(effectiveArgs)
+              toolArgsText: summarizeText(effectiveArgs),
+              toolArgsJsonText: safeJsonStringify(effectiveArgs)
             }
           });
         }
@@ -1231,8 +1134,8 @@ export class AgentRuntime extends EventEmitter {
             turnIndex: this.turnIndex,
             toolName,
             toolCallId: toolCall.id,
-            toolArgsText: this.summarizeForEvent(effectiveArgs),
-            toolArgsJsonText: this.safeJsonStringify(effectiveArgs)
+            toolArgsText: summarizeText(effectiveArgs),
+            toolArgsJsonText: safeJsonStringify(effectiveArgs)
           }
         });
 
@@ -1247,7 +1150,7 @@ export class AgentRuntime extends EventEmitter {
           this.emitPluginOutput(runId, output);
         }
 
-        const maxRetries = stepGate.autoMode === true ? Number(process.env.WEAVE_DAG_TOOL_RETRIES ?? "1") : 0;
+        const maxRetries = stepGate.autoMode === true ? getDefaultToolRetries() : 0;
         let result: ToolExecuteResult =
           skipByApproval
             ? {
@@ -1265,7 +1168,7 @@ export class AgentRuntime extends EventEmitter {
           let attempt = 0;
           while (attempt <= maxRetries) {
             attempt += 1;
-            result = await this.toolRegistry.execute(toolName, this.stripRuntimeToolMeta(effectiveArgs), {
+            result = await this.toolRegistry.execute(toolName, stripRuntimeToolMeta(effectiveArgs), {
               sessionId: this.sessionId,
               runId,
               workspaceRoot: process.cwd()
@@ -1275,17 +1178,18 @@ export class AgentRuntime extends EventEmitter {
               break;
             }
 
-            const repairResult = await this.repairToolArgsByIntent(
+            const repairResult = await repairToolArgsByIntent(
               {
                 toolName,
                 intentSummary: toolIntent.summary,
-                previousArgs: this.stripRuntimeToolMeta(effectiveArgs),
-                lastResult: this.summarizeForEvent(result.content, 300)
+                previousArgs: stripRuntimeToolMeta(effectiveArgs),
+                lastResult: summarizeText(result.content, 300)
               },
-              systemPrompt
+              systemPrompt,
+              (input) => this.invokeLlmText(input)
             );
             if (repairResult.repairedArgs) {
-              effectiveArgs = this.attachIntentToToolArgs(repairResult.repairedArgs, toolIntent);
+              effectiveArgs = attachIntentToToolArgs(repairResult.repairedArgs, toolIntent);
             }
           }
         }
@@ -1313,7 +1217,7 @@ export class AgentRuntime extends EventEmitter {
             toolCallId: toolCall.id,
             toolOk: result.ok,
             toolStatus: result.ok ? "success" : "fail",
-            toolResultText: this.summarizeForEvent(result.content)
+            toolResultText: summarizeText(result.content)
           }
         });
 
@@ -1368,38 +1272,6 @@ export class AgentRuntime extends EventEmitter {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private summarizeForEvent(value: unknown, maxLength = 120): string {
-    if (value === null || value === undefined) {
-      return "";
-    }
-
-    let text = "";
-    if (typeof value === "string") {
-      text = value;
-    } else {
-      try {
-        text = JSON.stringify(value);
-      } catch {
-        text = String(value);
-      }
-    }
-
-    const normalized = text.replace(/\s+/g, " ").trim();
-    if (normalized.length <= maxLength) {
-      return normalized;
-    }
-
-    return `${normalized.slice(0, maxLength)}...`;
-  }
-
-  private safeJsonStringify(value: unknown): string {
-    try {
-      return JSON.stringify(value ?? {});
-    } catch {
-      return "{}";
-    }
-  }
-
   private async invokeLlmWithTools(input: {
     systemPrompt: string;
     messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
@@ -1416,211 +1288,6 @@ export class AgentRuntime extends EventEmitter {
       systemPrompt: input.systemPrompt,
       userMessage: input.userMessage,
       historyMessages: []
-    });
-  }
-
-  private tryParseJson(text: string): Record<string, unknown> {
-    try {
-      const parsed = JSON.parse(text || "{}");
-      if (parsed && typeof parsed === "object") {
-        return parsed as Record<string, unknown>;
-      }
-      return {};
-    } catch {
-      return {};
-    }
-  }
-
-  private deriveToolIntentFromAssistant(
-    assistantContent: string | null | undefined,
-    toolName: string,
-    toolArgs: unknown,
-    userInput: string
-  ): ToolIntentInfo {
-    const normalized = this.summarizeForEvent(assistantContent ?? "", 180);
-    const fallbackSummary = `为完成请求调用 ${toolName}`;
-    const argSummary = this.summarizeForEvent(toolArgs, 120);
-
-    return {
-      summary: normalized || fallbackSummary,
-      goal: argSummary ? `使用 ${toolName} 执行参数 ${argSummary}` : `使用 ${toolName} 完成与“${this.summarizeForEvent(userInput, 60)}”相关步骤`
-    };
-  }
-
-  private attachIntentToToolArgs(args: unknown, intent: ToolIntentInfo): Record<string, unknown> {
-    const argObj = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
-    return {
-      ...argObj,
-      __intentSummary: intent.summary,
-      __toolGoal: intent.goal
-    };
-  }
-
-  private extractRuntimeToolMeta(args: unknown): { intentSummary: string; toolGoal: string } {
-    const argObj = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
-    return {
-      intentSummary: typeof argObj.__intentSummary === "string" ? argObj.__intentSummary : "",
-      toolGoal: typeof argObj.__toolGoal === "string" ? argObj.__toolGoal : ""
-    };
-  }
-
-  private stripRuntimeToolMeta(args: unknown): Record<string, unknown> {
-    const argObj = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
-    const { __intentSummary, __toolGoal, ...rest } = argObj;
-    return rest;
-  }
-
-  private async repairToolArgsByIntent(ticket: ToolRetryTicket, systemPrompt: string): Promise<ToolRepairResult> {
-    const repairPrompt = [
-      "你是工具参数修复器。请根据失败信息修复参数，并且仅返回 JSON 对象，不要输出任何解释。",
-      `toolName=${ticket.toolName}`,
-      `intent=${ticket.intentSummary}`,
-      `previousArgs=${this.safeJsonStringify(ticket.previousArgs)}`,
-      `lastResult=${ticket.lastResult}`,
-      "要求：尽量最小修改参数；若无法修复则原样返回 previousArgs。"
-    ].join("\n");
-
-    const raw = await this.invokeLlmText({
-      systemPrompt,
-      userMessage: repairPrompt
-    });
-
-    const parsed = this.extractJsonObject(raw);
-    return {
-      repairedArgs: parsed,
-      llmOutput: raw
-    };
-  }
-
-  private extractJsonObject(text: string): Record<string, unknown> | null {
-    const trimmed = text.trim();
-    const direct = this.tryParseJson(trimmed);
-    if (Object.keys(direct).length > 0 || trimmed === "{}") {
-      return direct;
-    }
-
-    const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    if (fenceMatch?.[1]) {
-      const fenced = this.tryParseJson(fenceMatch[1]);
-      if (Object.keys(fenced).length > 0 || fenceMatch[1].trim() === "{}") {
-        return fenced;
-      }
-    }
-
-    const firstBrace = trimmed.indexOf("{");
-    const lastBrace = trimmed.lastIndexOf("}");
-    if (firstBrace >= 0 && lastBrace > firstBrace) {
-      const sliced = this.tryParseJson(trimmed.slice(firstBrace, lastBrace + 1));
-      if (Object.keys(sliced).length > 0) {
-        return sliced;
-      }
-    }
-
-    return null;
-  }
-
-  private async executeToolWithTimeout(
-    toolName: string,
-    args: unknown,
-    timeoutMs: number,
-    runId: string,
-    step: number,
-    toolCallId: string
-  ): Promise<ToolExecuteResult> {
-    try {
-      const result = await this.withTimeout(
-        this.toolRegistry.execute(toolName, this.stripRuntimeToolMeta(args), {
-          sessionId: this.sessionId,
-          runId,
-          workspaceRoot: process.cwd()
-        }),
-        timeoutMs,
-        `工具执行超时: ${toolName} 超过 ${timeoutMs}ms`
-      );
-      return result;
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      this.logger.error("run.dag.tool.error", "DAG 工具执行失败", {
-        runId,
-        step,
-        toolName,
-        toolCallId,
-        errorMessage
-      });
-      return {
-        ok: false,
-        content: errorMessage,
-        metadata: {
-          timeoutMs,
-          timedOut: errorMessage.includes("超时")
-        }
-      };
-    }
-  }
-
-  private async withTimeout<TValue>(promise: Promise<TValue>, timeoutMs: number, timeoutMessage: string): Promise<TValue> {
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<TValue>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
-        })
-      ]);
-    } finally {
-      if (timer) {
-        clearTimeout(timer);
-      }
-    }
-  }
-
-  private emitDagNodeTransitionEvent(runId: string, payload: DagNodeTransitionPayload): void {
-    const envelope = createDagEventEnvelope(runId, "dag.node.transition", payload);
-    this.emitPluginOutput(runId, {
-      pluginName: "weave",
-      outputType: "weave.dag.event",
-      outputText: this.safeJsonStringify(envelope)
-    });
-  }
-
-  private emitWeaveDagNodeEvent(
-    runId: string,
-    payload: { nodeId: string; parentId?: string; label: string; status: "running" | "waiting" | "success" | "fail" }
-  ): void {
-    this.emitPluginOutput(runId, {
-      pluginName: "weave",
-      outputType: "weave.dag.node",
-      outputText: this.safeJsonStringify(payload)
-    });
-  }
-
-  private emitWeaveDagDetailEvent(runId: string, payload: { nodeId: string; text: string }): void {
-    this.emitPluginOutput(runId, {
-      pluginName: "weave",
-      outputType: "weave.dag.detail",
-      outputText: this.safeJsonStringify(payload)
-    });
-  }
-
-  private emitDagNodeDetailEvent(runId: string, payload: DagNodeDetailPayload): void {
-    const envelope = createDagEventEnvelope(runId, "dag.node.detail", payload);
-    this.emitPluginOutput(runId, {
-      pluginName: "weave",
-      outputType: "weave.dag.event",
-      outputText: this.safeJsonStringify(envelope)
-    });
-  }
-
-  private emitDagSchedulerIssueEvent(
-    runId: string,
-    eventType: "dag.scheduler.deadlock" | "dag.scheduler.integrity",
-    payload: DagSchedulerIssuePayload
-  ): void {
-    const envelope = createDagEventEnvelope(runId, eventType, payload);
-    this.emitPluginOutput(runId, {
-      pluginName: "weave",
-      outputType: "weave.dag.event",
-      outputText: this.safeJsonStringify(envelope)
     });
   }
 
