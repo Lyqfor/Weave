@@ -312,6 +312,28 @@ export class ToolNode extends BaseNode {
         },
         ctx.logger
       );
+
+      // 创建 RetryToolNode 记录本次重试结果（可视化用，外部调度器不会调度）
+      const retryNode = new ToolNode(`retry-${this.id}-${attempt}`, {
+        toolName: this.toolName,
+        toolCallId: this.toolCallId,
+        args: effectiveArgs,
+        intent: this.intent,
+        maxRetries: 0,
+        step: this.step,
+        currentAttempt: attempt
+      }, this.id);
+      retryNode.markRunning();
+      retryNode.setResult(finalResult.ok, finalResult.content);
+      if (finalResult.ok) {
+        retryNode.markSuccess();
+      } else {
+        retryNode.markFailed({ name: "ToolError", message: String(finalResult.content) });
+      }
+      const retryStatus = finalResult.ok ? "success" : "fail";
+      ctx.dag.addNode({ id: retryNode.id, type: "tool", status: retryStatus });
+      ctx.dag.addEdge(prevNodeId, retryNode.id);
+      prevNodeId = retryNode.id;
     }
 
     // ── 重试耗尽仍失败 → 添加 EscalationNode（可视化） ──────────────────────
