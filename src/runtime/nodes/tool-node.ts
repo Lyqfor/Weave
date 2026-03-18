@@ -13,8 +13,6 @@ import type { RunContext } from "../../session/run-context.js";
 import { executeToolWithTimeout } from "../../agent/tool-executor.js";
 import { repairToolArgsByIntent } from "../../agent/tool-executor.js";
 import { summarizeText, safeJsonStringify } from "../../utils/text-utils.js";
-import { emitWeaveDagNode, emitWeaveDagDetail } from "../../agent/weave-emitter.js";
-import type { AgentPluginOutput } from "../../agent/plugins/agent-plugin.js";
 
 export interface ToolNodeInit {
   toolName: string;
@@ -66,7 +64,6 @@ export class ToolNode extends BaseNode {
     this.markRunning();
     this.transitionInDag(ctx, "running", "scheduler-picked");
 
-    const emitFn = (_runId: string, output: AgentPluginOutput) => ctx.bus.dispatchPluginOutput(output);
     let effectiveArgs = { ...this.args };
     let skipByApproval = false;
 
@@ -212,41 +209,97 @@ export class ToolNode extends BaseNode {
       ctx.bus.dispatchPluginOutput(output);
     }
 
-    // ── 工具执行主循环（含重试） ──────────────────────────────────────────────
-    let attempt = 0;
-    let finalResult = { ok: false, content: "工具执行失败", metadata: {} };
-    let prevNodeId = this.id; // 重试链的依赖锚点
+    // ── 第一次执行（ToolNode 本身即是第一次尝试，不创建子节点） ────────────
+    let finalResult = await executeToolWithTimeout(
+      ctx.toolRegistry,
+      {
+        toolName: this.toolName,
+        args: effectiveArgs,
+        timeoutMs: ctx.defaultToolTimeoutMs,
+        runId: ctx.runId,
+        step: this.step,
+        toolCallId: this.toolCallId,
+        sessionId: ctx.sessionId
+      },
+      ctx.logger
+    );
+    let attempt = 1;
+    let prevNodeId = this.id; // 修复链的依赖锚点
 
-    while (attempt <= this.maxRetries) {
+    // ── 失败时依次创建 RepairNode 并重试 ────────────────────────────────────
+    // 每次循环：当前执行失败 → 创建 RepairNode 修复参数 → 重新执行工具
+    while (!finalResult.ok && attempt <= this.maxRetries) {
+      ctx.bus.dispatch("tool.retry.start", {
+        sessionId: ctx.sessionId,
+        turnIndex: ctx.turnIndex,
+        toolName: this.toolName,
+        toolCallId: this.toolCallId,
+        retryAttempt: attempt,
+        retryMax: this.maxRetries,
+        retryReason: summarizeText(finalResult.content)
+      });
+
+      // 创建 RepairNode（加入 DAG 可视化，已完成态，外部调度器不会调度）
+      const repairNode = new RepairNode(`repair-${this.id}-${attempt}`, {
+        lastError: summarizeText(finalResult.content, 300),
+        originalArgs: effectiveArgs
+      }, this.id);
+      repairNode.markRunning();
+
+      // LLM 修复参数
+      const repairResult = await repairToolArgsByIntent(
+        {
+          toolName: this.toolName,
+          intentSummary: this.intent,
+          previousArgs: effectiveArgs,
+          lastResult: summarizeText(finalResult.content, 300)
+        },
+        ctx.memoryStore.buildSystemPrompt(ctx.systemPrompt),
+        (input) => ctx.llmClient.chat({
+          systemPrompt: input.systemPrompt,
+          userMessage: input.userMessage,
+          historyMessages: []
+        })
+      );
+
+      const repairedArgs = (repairResult.repairedArgs ?? effectiveArgs) as Record<string, unknown>;
+      repairNode.setRepaired(repairedArgs);
+      // RepairNode 以 success 状态加入 DAG（外部调度器不会再调度它）
+      ctx.dag.addNode({ id: repairNode.id, type: "repair", status: "success" });
+      ctx.dag.addEdge(prevNodeId, repairNode.id);
+      prevNodeId = repairNode.id;
+
+      ctx.bus.dispatch("tool.retry.end", {
+        sessionId: ctx.sessionId,
+        turnIndex: ctx.turnIndex,
+        toolName: this.toolName,
+        toolCallId: this.toolCallId,
+        retryAttempt: attempt,
+        retryMax: this.maxRetries,
+        retryPrepared: repairResult.repairedArgs !== null
+      });
+
+      effectiveArgs = repairedArgs;
       attempt++;
-      const attemptNodeId = `${this.id}.attempt-${attempt}`;
-      const attemptLabel = attempt === 1 ? `工具执行尝试 #${attempt}` : `自动重试执行 #${attempt}`;
 
-      emitWeaveDagNode(ctx.runId, {
-        nodeId: attemptNodeId,
-        parentId: this.id,
-        label: attemptLabel,
-        status: "running"
-      }, emitFn);
-      emitWeaveDagDetail(ctx.runId, {
-        nodeId: attemptNodeId,
-        text: `attempt=${attempt}/${totalAttempts}`
-      }, emitFn);
-
-      if (attempt > 1) {
-        ctx.bus.dispatch("tool.retry.start", {
-          sessionId: ctx.sessionId,
-          turnIndex: ctx.turnIndex,
+      // 用修复后的参数重新执行工具
+      for (const plugin of ctx.plugins) {
+        const output = await plugin.beforeToolExecution?.({
+          ...ctx.basePluginContext,
+          step: this.step,
           toolName: this.toolName,
           toolCallId: this.toolCallId,
-          retryAttempt: attempt,
-          retryMax: this.maxRetries,
-          retryReason: summarizeText(finalResult.content)
+          args: effectiveArgs,
+          intentSummary: this.intent,
+          attempt,
+          maxRetries: this.maxRetries,
+          previousError: summarizeText(finalResult.content, 300),
+          repairedFrom: { ...this.args }
         });
+        ctx.bus.dispatchPluginOutput(output);
       }
 
-      const attemptStartedAt = Date.now();
-      const toolResult = await executeToolWithTimeout(
+      finalResult = await executeToolWithTimeout(
         ctx.toolRegistry,
         {
           toolName: this.toolName,
@@ -259,102 +312,6 @@ export class ToolNode extends BaseNode {
         },
         ctx.logger
       );
-      const attemptElapsedMs = Math.max(0, Date.now() - attemptStartedAt);
-      finalResult = toolResult as typeof finalResult;
-
-      if (finalResult.ok) {
-        emitWeaveDagNode(ctx.runId, { nodeId: attemptNodeId, parentId: this.id, label: attemptLabel, status: "success" }, emitFn);
-        emitWeaveDagDetail(ctx.runId, { nodeId: attemptNodeId, text: `ok elapsed=${attemptElapsedMs}ms result=${summarizeText(finalResult.content, 160)}` }, emitFn);
-
-        if (attempt > 1) {
-          ctx.bus.dispatch("tool.retry.end", {
-            sessionId: ctx.sessionId,
-            turnIndex: ctx.turnIndex,
-            toolName: this.toolName,
-            toolCallId: this.toolCallId,
-            toolOk: true,
-            retryAttempt: attempt,
-            retryMax: this.maxRetries
-          });
-        }
-        break;
-      }
-
-      emitWeaveDagNode(ctx.runId, { nodeId: attemptNodeId, parentId: this.id, label: attemptLabel, status: "fail" }, emitFn);
-      emitWeaveDagDetail(ctx.runId, { nodeId: attemptNodeId, text: `fail elapsed=${attemptElapsedMs}ms reason=${summarizeText(finalResult.content, 160)}` }, emitFn);
-
-      if (attempt <= this.maxRetries) {
-        // 创建 RepairNode（可视化）
-        const repairNode = new RepairNode(`repair-${this.id}-${attempt}`, {
-          lastError: summarizeText(finalResult.content, 300),
-          originalArgs: effectiveArgs
-        }, this.id);
-        repairNode.markRunning();
-
-        // LLM 修复参数
-        const repairResult = await repairToolArgsByIntent(
-          {
-            toolName: this.toolName,
-            intentSummary: this.intent,
-            previousArgs: effectiveArgs,
-            lastResult: summarizeText(finalResult.content, 300)
-          },
-          ctx.memoryStore.buildSystemPrompt(ctx.systemPrompt),
-          (input) => ctx.llmClient.chat({
-            systemPrompt: input.systemPrompt,
-            userMessage: input.userMessage,
-            historyMessages: []
-          })
-        );
-
-        const repairedArgs = repairResult.repairedArgs ?? effectiveArgs;
-        repairNode.setRepaired(repairedArgs);
-        // 将 RepairNode 以 success 状态加入 DAG（外部调度器不会再调度它）
-        ctx.dag.addNode({ id: repairNode.id, type: "repair", status: "success" });
-        ctx.dag.addEdge(prevNodeId, repairNode.id);
-        prevNodeId = repairNode.id;
-
-        emitWeaveDagNode(ctx.runId, {
-          nodeId: `repair-viz-${this.id}-${attempt}`,
-          parentId: this.id,
-          label: `局部修复参数 #${attempt}`,
-          status: "success"
-        }, emitFn);
-        emitWeaveDagDetail(ctx.runId, {
-          nodeId: `repair-viz-${this.id}-${attempt}`,
-          text: repairResult.repairedArgs
-            ? `repaired_args=${safeJsonStringify(repairedArgs).slice(0, 200)}`
-            : `repaired_args=unchanged`
-        }, emitFn);
-
-        ctx.bus.dispatch("tool.retry.end", {
-          sessionId: ctx.sessionId,
-          turnIndex: ctx.turnIndex,
-          toolName: this.toolName,
-          toolCallId: this.toolCallId,
-          retryAttempt: attempt,
-          retryMax: this.maxRetries,
-          retryPrepared: repairResult.repairedArgs !== null
-        });
-
-        effectiveArgs = repairedArgs as Record<string, unknown>;
-
-        for (const plugin of ctx.plugins) {
-          const output = await plugin.beforeToolExecution?.({
-            ...ctx.basePluginContext,
-            step: this.step,
-            toolName: this.toolName,
-            toolCallId: this.toolCallId,
-            args: effectiveArgs,
-            intentSummary: this.intent,
-            attempt: attempt + 1,
-            maxRetries: this.maxRetries,
-            previousError: summarizeText(finalResult.content, 300),
-            repairedFrom: { ...this.args }
-          });
-          ctx.bus.dispatchPluginOutput(output);
-        }
-      }
     }
 
     // ── 重试耗尽仍失败 → 添加 EscalationNode（可视化） ──────────────────────
