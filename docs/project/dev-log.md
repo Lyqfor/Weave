@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-03-18 · Entry 005 · weave-graph-web 前端 UI 全面重构 — 高级暗色工作室主题
+
+### 变更范围
+- `apps/weave-graph-web/index.html`（添加 Inter + JetBrains Mono 字体）
+- `apps/weave-graph-web/src/app.css`（完整重写）
+- `apps/weave-graph-web/src/nodes/semantic-node.tsx`（节点卡片全面升级）
+- `apps/weave-graph-web/src/App.tsx`（Header、Canvas 空状态、Inspector 全面升级）
+- `apps/weave-graph-web/src/components/ChatPanel.tsx`（Emoji 状态图标、渐变气泡、🌱 空状态）
+- `apps/weave-graph-web/src/components/ApprovalPanel.tsx`（🛡️/🔐 头部、Emoji 按钮、工具名称卡片）
+- `apps/weave-graph-web/src/components/InspectorTextBlock.tsx`（复制绿光闪烁、按内容类型选字体）
+- `apps/weave-graph-web/src/edges/FlowEdge.tsx`（彗星双层流光动画、3锚点渐变、geometricPrecision）
+- `apps/weave-graph-web/src/icons/*.tsx`（10个图标文件全部替换为 Emoji span）
+
+### 做了什么
+- 全局设计语言从"深空控制台"升级为"高级暗色工作室"，底色调整为蓝紫色温 `#0a0d14`
+- 所有 SVG 节点图标替换为 Emoji（🧠 🛠️ 🔄 🚨 🔀 🛡️ 🩹 ✅ ⚙️ 💬），新增 AttemptIcon/EscalationIcon 以区分语义
+- `app.css` 引入玻璃态变量、弹性动画时序、双字体系统、P3 广色域支持、Ghost 滚动条、`::selection` 品牌色
+- 节点卡片：宽 248px、圆角 16px、真实 1px 玻璃边框 + `background-clip`、`filter: drop-shadow` 外阴影（防脏渗透）、`::after` 伪元素承载运行态光晕（GPU 合成零重绘）、Safari WebKit 毛玻璃圆角修复
+- 连线改为彗星双层渲染：底层静态轨道（带 filter 发光）+ 顶层纯净彗星动线（不加 filter，GPU 友好），3锚点紫→蓝→天蓝渐变消除 RGB 泥潭色
+- ChatPanel：SVG → Emoji 状态图标（🤔 ✅ ⚠️ ⏳），渐变用户气泡，渐变活跃指示线，🌱 空状态
+- ApprovalPanel：🛡️/🔐 头部 + 副标题，工具名称橙金卡片，Emoji 操作按钮（✅ ✏️ ⏭ 🛑）
+- InspectorTextBlock：复制成功绿光闪烁 150ms，JSON/代码 → `--font-mono`，自然语言 → `--font-ui`
+- 画布空状态：🌌 巨型水印 + `AWAITING_INITIAL_PROMPT_` 终端光标闪烁
+
+### 为什么这样做
+用户反馈原有深空主题视觉体验僵硬、缺乏灵动感，SVG 图标不好看，参考 molty.me、openclaw.ai 等现代 AI 产品风格进行全面视觉重构，同时保证所有后端逻辑、Zustand store、WebSocket、Dagre 布局均不修改。
+
+### 关键决策
+- attempt/escalation 语义截然不同（正常重试 vs 熔断升级），不合并为同一图标
+- 彗星动线不加 filter 是 GPU 性能关键：15 条同时动画若每条加 filter，帧率会从 60fps 暴跌
+- 外阴影改用 `filter: drop-shadow` 而非 `box-shadow`，防止阴影透过玻璃半透明背景向内渗透变脏
+
 ## 2026-03-18 · Entry 004 · 核心运行时大重构：事件总线、RunContext、DAG 执行器与节点 execute()
 
 ### 变更范围

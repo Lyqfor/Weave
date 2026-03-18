@@ -1,6 +1,5 @@
 /*
- * 文件作用：Inspector 文本块组件，支持折叠/展开、语法高亮和复制功能。
- * 从 App.tsx 提取，功能不变。
+ * 文件作用：Inspector 文本块组件，支持折叠/展开、语法高亮、复制闪光反馈，按内容类型选择字体。
  */
 
 import React, { useEffect, useState } from "react";
@@ -17,8 +16,12 @@ export function InspectorTextBlock({ text }: { text: string }) {
   const shouldCollapse = normalizedText.length > 120 || normalizedText.includes("\n");
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [flashGreen, setFlashGreen] = useState(false);
   const [SyntaxHighlighterComp, setSyntaxHighlighterComp] = useState<null | React.ComponentType<any>>(null);
   const [highlighterTheme, setHighlighterTheme] = useState<any>(null);
+
+  // JSON 和代码使用等宽字体；自然语言文字用 UI 字体
+  const contentFont = isLikelyJson ? "var(--font-mono)" : "var(--font-ui)";
 
   useEffect(() => {
     let cancelled = false;
@@ -41,7 +44,11 @@ export function InspectorTextBlock({ text }: { text: string }) {
     try {
       await navigator.clipboard.writeText(normalizedText);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1000);
+      setFlashGreen(true);
+      window.setTimeout(() => {
+        setCopied(false);
+        setFlashGreen(false);
+      }, 1000);
     } catch {
       setCopied(false);
     }
@@ -53,11 +60,18 @@ export function InspectorTextBlock({ text }: { text: string }) {
 
   if (!shouldCollapse) {
     return (
-      <div className="inspector-code-toolbar-wrap">
-        <div className="inspector-code">{normalizedText}</div>
+      <div
+        className="inspector-code-toolbar-wrap"
+        style={{
+          transition: "background var(--duration-fast) var(--ease-out-quart)",
+          background: flashGreen ? "rgba(61,198,83,0.06)" : undefined,
+          borderRadius: 6,
+        }}
+      >
+        <div className="inspector-code" style={{ fontFamily: contentFont }}>{normalizedText}</div>
         <div className="inspector-toolbar">
           <button className="inspector-btn" onClick={() => void onCopy()}>
-            {copied ? "已复制" : "复制"}
+            {copied ? "✅ 已复制" : "复制"}
           </button>
         </div>
       </div>
@@ -66,7 +80,14 @@ export function InspectorTextBlock({ text }: { text: string }) {
 
   const preview = normalizedText.length > 120 ? `${normalizedText.slice(0, 120)}...` : normalizedText;
   return (
-    <div className="inspector-code-toolbar-wrap">
+    <div
+      className="inspector-code-toolbar-wrap"
+      style={{
+        transition: "background var(--duration-fast) var(--ease-out-quart)",
+        background: flashGreen ? "rgba(61,198,83,0.06)" : undefined,
+        borderRadius: 6,
+      }}
+    >
       <div className="inspector-toolbar">
         <button className={`inspector-btn ${!expanded ? "active" : ""}`} onClick={() => setExpanded(false)}>
           摘要
@@ -75,18 +96,18 @@ export function InspectorTextBlock({ text }: { text: string }) {
           展开
         </button>
         <button className="inspector-btn" onClick={() => void onCopy()}>
-          {copied ? "已复制" : "复制"}
+          {copied ? "✅ 已复制" : "复制"}
         </button>
       </div>
 
       {!expanded ? (
-        <div className="inspector-code">{preview}</div>
+        <div className="inspector-code" style={{ fontFamily: contentFont }}>{preview}</div>
       ) : SyntaxHighlighterComp && highlighterTheme ? (
         <div className="inspector-code-block">
           <SyntaxHighlighterComp
             language={isLikelyJson ? "json" : "bash"}
             style={highlighterTheme}
-            customStyle={{ margin: 0, fontSize: 11 }}
+            customStyle={{ margin: 0, fontSize: 11, fontFamily: "var(--font-mono)" }}
           >
             {normalizedText}
           </SyntaxHighlighterComp>

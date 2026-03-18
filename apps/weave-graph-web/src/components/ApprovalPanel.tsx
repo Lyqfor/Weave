@@ -1,5 +1,5 @@
 /*
- * 文件作用：Step Gate 审批面板 — 深空控制台风格，顶部警示条，主/危险按钮分组。
+ * 文件作用：Step Gate 审批面板 — 高级暗色工作室风格，Emoji 图标，玻璃态渐变背景，浮起按钮。
  */
 
 import { useState } from "react";
@@ -41,19 +41,37 @@ export function ApprovalPanel({ toolName, toolParams, onAction }: ApprovalPanelP
       {/* Header */}
       <div className="approval-header">
         <span className="approval-icon">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M8 1.5L13.5 4.5V11.5L8 14.5L2.5 11.5V4.5L8 1.5Z" stroke="#ffa657" strokeWidth="1.2" fill="rgba(255,166,87,0.12)" />
-            <line x1="6.5" y1="5.5" x2="6.5" y2="10.5" stroke="#ffa657" strokeWidth="1.5" strokeLinecap="round" />
-            <line x1="9.5" y1="5.5" x2="9.5" y2="10.5" stroke="#ffa657" strokeWidth="1.5" strokeLinecap="round" />
-          </svg>
+          <span className="emoji-icon" style={{ fontSize: 16 }}>🛡️</span>
         </span>
-        <span className="approval-title">Step Gate — 等待放行</span>
+        <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          <span className="approval-title">🔐 Step Gate · 等待放行</span>
+          <span style={{
+            fontSize: 10,
+            color: "var(--text-muted)",
+            fontFamily: "var(--font-ui)",
+          }}>
+            AI 即将执行以下工具调用，请确认后放行
+          </span>
+        </div>
       </div>
 
       <div className="approval-body">
+        {/* 工具名称卡片 */}
         <div className="inspector-group">
           <div className="inspector-label">工具名称</div>
-          <div className="inspector-code" style={{ color: "#ffa657" }}>{toolName}</div>
+          <div style={{
+            background: "rgba(255,171,94,0.1)",
+            border: "1px solid rgba(255,171,94,0.25)",
+            borderRadius: 8,
+            padding: "6px 10px",
+            color: "#ffab5e",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            fontWeight: 600,
+            backgroundClip: "padding-box",
+          }}>
+            🛠️ {toolName}
+          </div>
         </div>
 
         <div className="inspector-group">
@@ -77,7 +95,7 @@ export function ApprovalPanel({ toolName, toolParams, onAction }: ApprovalPanelP
             onClick={() => onAction("approve")}
             title="直接放行，使用原始参数"
           >
-            ✓ 放行
+            ✅ 放行
           </button>
           <button
             className="approval-btn edit"
@@ -85,7 +103,7 @@ export function ApprovalPanel({ toolName, toolParams, onAction }: ApprovalPanelP
             disabled={Boolean(jsonError) || !hasEdited}
             title="使用编辑后的参数放行"
           >
-            ✎ 编辑后放行
+            ✏️ 编辑后放行
           </button>
         </div>
 
@@ -98,20 +116,20 @@ export function ApprovalPanel({ toolName, toolParams, onAction }: ApprovalPanelP
             onClick={() => onAction("skip")}
             title="跳过本次工具调用"
           >
-            ⟫ 跳过
+            ⏭ 跳过
           </button>
           <button
             className="approval-btn abort"
             onClick={() => onAction("abort")}
             title="终止本轮执行"
           >
-            ✕ 终止
+            🛑 终止
           </button>
         </div>
       </div>
 
       <div className="approval-hint">
-        提示：可在 CLI 按 Enter / E / S / Q 或在此面板操作
+        💡 可在 CLI 按 Enter · E · S · Q 操作
       </div>
     </div>
   );
