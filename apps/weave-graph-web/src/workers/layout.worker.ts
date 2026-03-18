@@ -4,8 +4,8 @@
 
 import dagre from "dagre";
 
-const NODE_WIDTH = 260;
-const NODE_HEIGHT = 80;
+const NODE_WIDTH = 240;
+const NODE_HEIGHT = 72;
 
 interface NodeLike {
   id: string;

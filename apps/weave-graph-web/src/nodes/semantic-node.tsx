@@ -1,54 +1,94 @@
 /*
- * 文件作用：语义化节点渲染组件 — 玻璃态卡片，Emoji 图标，TB 方向 Handle。
+ * 文件作用：语义化节点渲染组件 — 深空控制台风格卡片，SVG图标，状态竖线+顶部颜色条。
  */
 
 import { memo } from "react";
 import { Handle, Position } from "reactflow";
-// import {
-//   BrainCircuit, Zap, PauseOctagon, ShieldAlert, Sparkles, Cpu, MessageCircle,
-//   Timer, Coins, type LucideIcon
-// } from "lucide-react";
 import type { GraphNodeData } from "../types/graph-events";
+import { LlmIcon } from "../icons/LlmIcon";
+import { ToolIcon } from "../icons/ToolIcon";
+import { GateIcon } from "../icons/GateIcon";
+import { FinalIcon } from "../icons/FinalIcon";
+import { InputIcon } from "../icons/InputIcon";
+import { SystemIcon } from "../icons/SystemIcon";
+import { RepairIcon } from "../icons/RepairIcon";
+import { ConditionIcon } from "../icons/ConditionIcon";
 
 interface KindConfig {
-  icon: string;
+  Icon: React.ComponentType<{ size?: number; color?: string }>;
   color: string;
+  label: string;
 }
 
 const KIND_MAP: Record<string, KindConfig> = {
-  llm:        { icon: "🧠", color: "#a855f7" },
-  tool:       { icon: "⚡", color: "#3b82f6" },
-  attempt:    { icon: "⚡", color: "#3b82f6" },
-  escalation: { icon: "⚡", color: "#3b82f6" },
-  condition:  { icon: "⚡", color: "#3b82f6" },
-  gate:       { icon: "⏸️", color: "#f59e0b" },
-  repair:     { icon: "✖️", color: "#ef4444" },
-  final:      { icon: "✔️", color: "#10b981" },
-  system:     { icon: "🧱", color: "#64748b" },
-  input:      { icon: "💬", color: "#06b6d4" },
+  llm:        { Icon: LlmIcon,       color: "#bc8cff", label: "llm" },
+  tool:       { Icon: ToolIcon,      color: "#58a6ff", label: "tool" },
+  attempt:    { Icon: ToolIcon,      color: "#58a6ff", label: "attempt" },
+  escalation: { Icon: ToolIcon,      color: "#58a6ff", label: "escalation" },
+  condition:  { Icon: ConditionIcon, color: "#79c0ff", label: "condition" },
+  gate:       { Icon: GateIcon,      color: "#ffa657", label: "gate" },
+  repair:     { Icon: RepairIcon,    color: "#f85149", label: "repair" },
+  final:      { Icon: FinalIcon,     color: "#3fb950", label: "final" },
+  system:     { Icon: SystemIcon,    color: "#6e7681", label: "system" },
+  input:      { Icon: InputIcon,     color: "#39d3f5", label: "input" },
 };
 
-const DEFAULT_KIND: KindConfig = { icon: "⚡", color: "#3b82f6" };
+const DEFAULT_KIND: KindConfig = { Icon: ToolIcon, color: "#58a6ff", label: "node" };
 
-function getStatusDot(status?: string): { color: string; pulse: boolean } {
-  if (status === "running" || status === "retrying") return { color: "#f59e0b", pulse: true };
-  if (status === "success") return { color: "#22c55e", pulse: false };
-  if (status === "fail")    return { color: "#ef4444", pulse: false };
-  if (status === "skipped") return { color: "#475569", pulse: false };
-  return { color: "#64748b", pulse: false };
+interface StatusStyle {
+  barColor: string;
+  glowColor: string;
+  glow: boolean;
+  badgeText: string;
+  badgeBg: string;
+  badgeColor: string;
+  badgePulse: boolean;
+}
+
+function getStatusStyle(status?: string, kindColor?: string): StatusStyle {
+  switch (status) {
+    case "running":
+      return {
+        barColor: "#f0a500", glowColor: "#f0a500", glow: true,
+        badgeText: "RUNNING", badgeBg: "rgba(240,165,0,0.18)", badgeColor: "#f0a500", badgePulse: true,
+      };
+    case "retrying":
+      return {
+        barColor: "#e8852a", glowColor: "#e8852a", glow: true,
+        badgeText: "RETRY", badgeBg: "rgba(232,133,42,0.18)", badgeColor: "#e8852a", badgePulse: true,
+      };
+    case "success":
+      return {
+        barColor: "#3fb950", glowColor: "#3fb950", glow: false,
+        badgeText: "DONE", badgeBg: "rgba(63,185,80,0.15)", badgeColor: "#3fb950", badgePulse: false,
+      };
+    case "fail":
+      return {
+        barColor: "#f85149", glowColor: "#f85149", glow: false,
+        badgeText: "FAIL", badgeBg: "rgba(248,81,73,0.18)", badgeColor: "#f85149", badgePulse: false,
+      };
+    case "skipped":
+      return {
+        barColor: "#6e7681", glowColor: "#6e7681", glow: false,
+        badgeText: "SKIP", badgeBg: "rgba(110,118,129,0.15)", badgeColor: "#6e7681", badgePulse: false,
+      };
+    default: // pending
+      return {
+        barColor: kindColor ?? "#484f58", glowColor: kindColor ?? "#484f58", glow: false,
+        badgeText: "WAIT", badgeBg: "rgba(48,54,61,0.4)", badgeColor: "#6e7681", badgePulse: false,
+      };
+  }
 }
 
 function parseFooter(data: GraphNodeData): { ms?: string; tokens?: string } {
-  // 优先从 metrics 读取
   if (data.metrics?.durationMs !== undefined) {
     const ms = `${data.metrics.durationMs}ms`;
     const tokens =
       data.metrics.promptTokens !== undefined
-        ? `${data.metrics.promptTokens}+${data.metrics.completionTokens ?? 0} tokens`
+        ? `${data.metrics.promptTokens}+${data.metrics.completionTokens ?? 0}`
         : undefined;
     return { ms, tokens };
   }
-  // 降级：从副标题文本解析（旧格式兼容）
   const subtitle = data.subtitle ?? "";
   if (!subtitle) return {};
   const parts = subtitle.split(/[·•|]/);
@@ -64,59 +104,88 @@ interface SemanticNodeProps {
 export const SemanticNode = memo(function SemanticNode({ data }: SemanticNodeProps) {
   const kind = data.kind ?? "tool";
   const status = data.status ?? "pending";
-  const { icon, color } = KIND_MAP[kind] ?? DEFAULT_KIND;
-  const dot = getStatusDot(status);
+  const { Icon, color, label } = KIND_MAP[kind] ?? DEFAULT_KIND;
+  const statusStyle = getStatusStyle(status, color);
   const isPendingApproval = data.pendingApproval === true;
   const footer = parseFooter(data);
 
-  const subtitleText = isPendingApproval
-    ? `等待放行 · ${data.approvalPayload?.toolName ?? "工具调用"}`
-    : undefined;
+  const vertBarStyle: React.CSSProperties = {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 3,
+    borderRadius: "0 1.5px 1.5px 0",
+    background: statusStyle.barColor,
+    ...(status === "pending" ? { opacity: 0.45 } : {}),
+    ...(statusStyle.glow ? {
+      boxShadow: `0 0 8px 3px ${statusStyle.glowColor}60`,
+      animation: "status-glow 1.6s ease-in-out infinite",
+    } : {}),
+  };
+
+  const topBarStyle: React.CSSProperties = {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 2,
+    background: statusStyle.barColor,
+    ...(status === "pending" ? { opacity: 0.3 } : {}),
+    ...(statusStyle.glow ? { animation: "status-glow 1.6s ease-in-out infinite" } : {}),
+  };
 
   return (
     <div
       className={`node-status-${status} ${isPendingApproval ? "node-pending-approval" : ""}`}
-      style={{ width: 260 }}
+      style={{ width: 240 }}
     >
       <Handle type="target" position={Position.Top} className="node-handle" />
 
-      {/* 玻璃态卡片 */}
       <div
         className="semantic-node-card"
         style={{
           position: "relative",
-          width: 260,
-          borderRadius: 12,
-          background: "rgba(24,24,27,0.90)",
+          width: 240,
+          borderRadius: 10,
+          background: "rgba(13,17,23,0.95)",
           backdropFilter: "blur(12px)",
-          border: "1px solid rgba(255,255,255,0.06)",
-          boxShadow: "0 8px 24px rgba(0,0,0,0.55)",
+          border: `1px solid rgba(48,54,61,0.7)`,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.65)",
           overflow: "hidden",
         }}
       >
-        {/* 左侧发光线 */}
-        <div
-          style={{
-            position: "absolute",
-            left: 0,
-            top: 8,
-            bottom: 8,
-            width: 3,
-            borderRadius: "0 2px 2px 0",
-            background: color,
-            boxShadow: `0 0 8px 3px ${color}50`,
-          }}
-        />
+        {/* 顶部颜色条 */}
+        <div style={topBarStyle} />
 
-        {/* Top Bar */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px 4px 14px" }}>
-          <span style={{ fontSize: 14, lineHeight: 1, flexShrink: 0 }}>{icon}</span>
+        {/* 左侧竖线 */}
+        <div style={vertBarStyle} />
+
+        {/* TypeBar：图标 + 类型小字 */}
+        <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "9px 10px 3px 14px" }}>
+          <Icon size={12} color={color} />
+          <span
+            style={{
+              fontSize: 10,
+              color: color,
+              fontWeight: 600,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase" as const,
+              opacity: 0.85,
+            }}
+          >
+            {label}
+          </span>
+        </div>
+
+        {/* TitleRow：主标题 + StatusBadge */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "1px 10px 4px 14px" }}>
           <span
             style={{
               flex: 1,
               fontSize: 13,
               fontWeight: 700,
-              color: "#ffffff",
+              color: "#e6edf3",
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -124,60 +193,51 @@ export const SemanticNode = memo(function SemanticNode({ data }: SemanticNodePro
           >
             {data.title}
           </span>
-          {/* 状态圆点 */}
-          <div
+          <span
+            className={`status-badge ${statusStyle.badgePulse ? status : ""}`}
             style={{
-              width: 7,
-              height: 7,
-              borderRadius: "50%",
-              background: dot.color,
-              boxShadow: `0 0 0 2px ${dot.color}30`,
-              animation: dot.pulse ? "node-aura 1.8s ease-in-out infinite" : undefined,
-              flexShrink: 0,
-            }}
-          />
-        </div>
-
-        {/* 副标题（审批状态） */}
-        {subtitleText && (
-          <div
-            style={{
-              fontSize: 11,
-              color: "#f59e0b",
-              padding: "0 12px 4px 14px",
-              fontFamily: "'JetBrains Mono', monospace",
+              background: statusStyle.badgeBg,
+              color: statusStyle.badgeColor,
+              border: `1px solid ${statusStyle.badgeColor}40`,
             }}
           >
-            ⏸ {subtitleText}
+            {statusStyle.badgeText}
+          </span>
+        </div>
+
+        {/* 审批副标题 */}
+        {isPendingApproval && (
+          <div
+            style={{
+              fontSize: 10,
+              color: "#ffa657",
+              padding: "0 10px 3px 14px",
+              fontFamily: "'JetBrains Mono', monospace",
+              opacity: 0.9,
+            }}
+          >
+            ⏸ 等待放行 · {data.approvalPayload?.toolName ?? "工具调用"}
           </div>
         )}
 
-        {/* Footer：耗时 + tokens */}
-        {(footer.ms || footer.tokens) && (
+        {/* FooterBar：耗时 + tokens */}
+        {(footer.ms || footer.tokens) ? (
           <div
             style={{
               display: "flex",
               alignItems: "center",
-              gap: 10,
-              padding: "2px 12px 8px 14px",
-              fontSize: 11,
-              color: "#6b7280",
+              gap: 8,
+              padding: "2px 10px 8px 14px",
+              fontSize: 10,
+              color: "#6e7681",
               fontFamily: "'JetBrains Mono', monospace",
             }}
           >
-            {/* <Timer size={10} strokeWidth={1.5} /> */}
             {footer.ms && <span>⏱ {footer.ms}</span>}
-            {/* <Coins size={10} strokeWidth={1.5} /> */}
-            {footer.tokens && <span>🪙 {footer.tokens}</span>}
+            {footer.tokens && <span>· {footer.tokens} tok</span>}
           </div>
-        )}
-
-        {/* 无 footer 时补充底部 padding */}
-        {!footer.ms && !footer.tokens && !subtitleText && (
-          <div style={{ height: 8 }} />
-        )}
-        {!footer.ms && !footer.tokens && subtitleText && (
-          <div style={{ height: 4 }} />
+        ) : (
+          <div style={{ height: isPendingApproval ? 4 : 8 }} />
         )}
       </div>
 

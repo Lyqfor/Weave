@@ -1,15 +1,50 @@
 /*
  * 文件作用：二维图页面基础样式 — Tailwind v4 + CSS token + 关键帧动画。
+ * 主题：深空控制台（Deep Space Control）
  */
 
 @import "tailwindcss";
 
 :root {
-  --bg-app: #0b0b0b;
-  --bg-panel: #111111;
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --text-main: #f3f4f6;
-  --text-soft: #9ca3af;
+  /* 背景层次（冷黑调，由深到浅） */
+  --bg-base:     #070b10;
+  --bg-surface:  #0d1117;
+  --bg-raised:   #161b22;
+  --bg-overlay:  #1c2128;
+  /* 向后兼容旧变量名 */
+  --bg-app:      var(--bg-base);
+  --bg-panel:    var(--bg-surface);
+
+  /* 边框系统 */
+  --border-dim:    rgba(48, 54, 61, 0.6);
+  --border-muted:  rgba(99, 110, 123, 0.4);
+  --border-active: rgba(88, 166, 255, 0.5);
+  --border-subtle: var(--border-dim);  /* 向后兼容 */
+
+  /* 文本层次 */
+  --text-primary:   #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted:     #6e7681;
+  --text-main:      var(--text-primary);   /* 向后兼容 */
+  --text-soft:      var(--text-secondary); /* 向后兼容 */
+
+  /* 节点类型品牌色 */
+  --color-llm:       #bc8cff;
+  --color-tool:      #58a6ff;
+  --color-gate:      #ffa657;
+  --color-final:     #3fb950;
+  --color-input:     #39d3f5;
+  --color-system:    #6e7681;
+  --color-repair:    #f85149;
+  --color-condition: #79c0ff;
+
+  /* 状态色（高辨识度，鲜艳） */
+  --status-running:  #f0a500;
+  --status-retrying: #e8852a;
+  --status-success:  #3fb950;
+  --status-fail:     #f85149;
+  --status-skipped:  #6e7681;
+  --status-pending-border: #484f58;
 }
 
 html,
@@ -31,7 +66,9 @@ body,
 .canvas-panel {
   grid-row: 2;
   position: relative;
-  background: radial-gradient(circle at 40% 30%, rgba(255, 255, 255, 0.025), rgba(10, 10, 10, 0.97));
+  background: radial-gradient(ellipse at 40% 30%, rgba(88, 166, 255, 0.04), transparent 60%),
+              radial-gradient(ellipse at 70% 80%, rgba(188, 140, 255, 0.03), transparent 50%),
+              var(--bg-base);
 }
 
 /* ====== Inspector Panel ====== */
@@ -56,27 +93,32 @@ body,
 
 .panel-title {
   margin: 0 0 12px;
-  font-size: 13px;
-  letter-spacing: 0.08em;
+  font-size: 11px;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: #d1d5db;
+  color: var(--text-muted);
+  font-weight: 600;
 }
 
 .inspector-group {
   margin-bottom: 12px;
   padding-bottom: 12px;
-  border-bottom: 1px solid #1f2937;
+  border-bottom: 1px solid var(--border-dim);
 }
 
 .inspector-label {
-  font-size: 11px;
-  color: #9ca3af;
+  font-size: 10px;
+  color: var(--text-muted);
   margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
 }
 
 .inspector-value {
   font-size: 12px;
   line-height: 1.45;
+  color: var(--text-secondary);
 }
 
 .inspector-code {
@@ -91,20 +133,189 @@ body,
   place-items: center;
   flex: 1;
   height: 200px;
-  color: #6b7280;
+  color: var(--text-muted);
   text-align: center;
   gap: 8px;
 }
 
 .inspector-empty-icon {
   font-size: 28px;
-  opacity: 0.5;
+  opacity: 0.3;
 }
 
 .inspector-code-block {
   border-radius: 8px;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-dim);
+}
+
+/* Inspector 按钮 */
+.inspector-btn {
+  background: rgba(88, 166, 255, 0.08);
+  border: 1px solid var(--border-dim);
+  color: var(--text-secondary);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.inspector-btn:hover {
+  background: rgba(88, 166, 255, 0.16);
+  border-color: var(--border-active);
+  color: var(--text-primary);
+}
+
+.inspector-btn.active {
+  background: rgba(88, 166, 255, 0.18);
+  border-color: rgba(88, 166, 255, 0.5);
+  color: #58a6ff;
+}
+
+.inspector-toolbar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.inspector-code-toolbar-wrap {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Inspector 节点头部卡片 */
+.inspector-node-header {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-dim);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+/* Inspector 指标卡片 */
+.stat-cards {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.stat-card {
+  flex: 1;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.stat-card-value {
+  font-family: "Consolas", "JetBrains Mono", monospace;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.stat-card-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Inspector 端口区 */
+.port-section {
+  margin-bottom: 12px;
+}
+
+.port-section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: 6px;
+  user-select: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  transition: background 0.15s;
+}
+
+.port-section-header:hover {
+  background: rgba(255,255,255,0.04);
+}
+
+.port-section-chevron {
+  font-size: 9px;
+  color: var(--text-muted);
+  transition: transform 0.2s;
+}
+
+.port-section-chevron.collapsed {
+  transform: rotate(-90deg);
+}
+
+.port-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  overflow: hidden;
+  transition: max-height 0.2s ease;
+}
+
+.port-section-body.collapsed {
+  max-height: 0;
+}
+
+.port-entry {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.port-entry-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: rgba(255,255,255,0.02);
+}
+
+.port-type-badge {
+  font-family: "Consolas", "JetBrains Mono", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.port-type-badge.text  { background: rgba(139,148,158,0.2);  color: #8b949e; }
+.port-type-badge.json  { background: rgba(88,166,255,0.18);  color: #58a6ff; }
+.port-type-badge.messages { background: rgba(188,140,255,0.18); color: #bc8cff; }
+.port-type-badge.number   { background: rgba(63,185,80,0.18);  color: #3fb950; }
+.port-type-badge.default  { background: rgba(139,148,158,0.2); color: #8b949e; }
+
+.port-entry-name {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.port-entry-content {
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--border-dim);
 }
 
 /* ====== 编排占位区 ====== */
@@ -112,8 +323,8 @@ body,
 .orchestrate-section {
   margin-top: auto;
   padding-top: 14px;
-  border-top: 1px solid #1f2937;
-  opacity: 0.45;
+  border-top: 1px solid var(--border-dim);
+  opacity: 0.4;
   pointer-events: none;
   display: flex;
   flex-direction: column;
@@ -121,20 +332,21 @@ body,
 }
 
 .orchestrate-title {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  color: #d1d5db;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
   margin-bottom: 2px;
 }
 
 .orchestrate-btn {
   width: 100%;
   text-align: left;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #9ca3af;
-  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-dim);
+  color: var(--text-muted);
+  border-radius: 6px;
   padding: 7px 10px;
   font-size: 12px;
   cursor: not-allowed;
@@ -143,9 +355,164 @@ body,
 
 .orchestrate-hint {
   font-size: 11px;
-  color: #4b5563;
+  color: var(--text-muted);
   margin: 0;
   text-align: center;
+  opacity: 0.6;
+}
+
+/* ====== ApprovalPanel ====== */
+
+.approval-panel {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 166, 87, 0.35);
+  background: linear-gradient(135deg, rgba(28, 20, 12, 0.9), rgba(22, 27, 34, 0.9));
+  margin-bottom: 12px;
+}
+
+.approval-top-bar {
+  height: 3px;
+  background: linear-gradient(90deg, var(--status-running), var(--color-gate));
+}
+
+.approval-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(255, 166, 87, 0.08);
+  border-bottom: 1px solid rgba(255, 166, 87, 0.2);
+}
+
+.approval-icon {
+  font-size: 14px;
+  color: var(--color-gate);
+}
+
+.approval-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-gate);
+  letter-spacing: 0.04em;
+}
+
+.approval-body {
+  padding: 12px 14px;
+}
+
+.approval-params-editor {
+  width: 100%;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-family: "Consolas", "JetBrains Mono", monospace;
+  padding: 8px 10px;
+  resize: vertical;
+  box-sizing: border-box;
+  line-height: 1.5;
+  min-height: 120px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.approval-params-editor:focus {
+  border-color: var(--border-active);
+}
+
+.approval-error {
+  font-size: 11px;
+  color: var(--status-fail);
+  margin-top: 5px;
+  padding: 4px 8px;
+  background: rgba(248, 81, 73, 0.1);
+  border-radius: 4px;
+  border: 1px solid rgba(248, 81, 73, 0.2);
+}
+
+.approval-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 14px 12px;
+}
+
+.approval-actions-primary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.approval-actions-danger {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.approval-divider {
+  height: 1px;
+  background: var(--border-dim);
+  margin: 4px 0;
+}
+
+.approval-btn {
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  font-weight: 600;
+  border: 1px solid transparent;
+  transition: opacity 0.15s, transform 0.1s;
+}
+
+.approval-btn:hover:not(:disabled) {
+  opacity: 0.85;
+  transform: translateY(-1px);
+}
+
+.approval-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.approval-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.approval-btn.approve {
+  background: rgba(63, 185, 80, 0.2);
+  border-color: rgba(63, 185, 80, 0.4);
+  color: var(--status-success);
+}
+
+.approval-btn.edit {
+  background: rgba(88, 166, 255, 0.15);
+  border-color: rgba(88, 166, 255, 0.35);
+  color: var(--color-tool);
+}
+
+.approval-btn.skip {
+  background: rgba(110, 118, 129, 0.15);
+  border-color: rgba(110, 118, 129, 0.3);
+  color: var(--text-muted);
+}
+
+.approval-btn.abort {
+  background: rgba(248, 81, 73, 0.15);
+  border-color: rgba(248, 81, 73, 0.3);
+  color: var(--status-fail);
+}
+
+.approval-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 0 14px 10px;
+  line-height: 1.4;
 }
 
 /* ── @keyframes ────────────────────────────────────── */
@@ -169,6 +536,21 @@ body,
   0%   { box-shadow: 0 0 0 2px rgba(245,158,11,0.85), 0 4px 12px rgba(0,0,0,0.5); }
   50%  { box-shadow: 0 0 0 7px rgba(245,158,11,0.2),  0 4px 20px rgba(245,158,11,0.3); }
   100% { box-shadow: 0 0 0 2px rgba(245,158,11,0.85), 0 4px 12px rgba(0,0,0,0.5); }
+}
+
+@keyframes status-glow {
+  0%, 100% { opacity: 0.75; }
+  50%       { opacity: 1; }
+}
+
+@keyframes badge-appear {
+  from { opacity: 0; transform: scale(0.82) translateX(4px); }
+  to   { opacity: 1; transform: scale(1) translateX(0); }
+}
+
+@keyframes edge-flow-dash {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: -20; }
 }
 
 /* ── 节点动画 ────────────────────────────────────────── */
@@ -196,17 +578,17 @@ body,
 }
 
 .ws-dot-connected {
-  background: #10b981;
-  box-shadow: 0 0 6px rgba(16,185,129,0.6);
+  background: #3fb950;
+  box-shadow: 0 0 6px rgba(63, 185, 80, 0.7);
 }
 
 .ws-dot-connecting {
-  background: #f59e0b;
+  background: var(--status-running);
   animation: blink 1.2s ease-in-out infinite;
 }
 
 .ws-dot-disconnected {
-  background: #6b7280;
+  background: var(--text-muted);
 }
 
 /* ReactFlow 边 glow（animated 时） */
@@ -223,4 +605,22 @@ body,
 .custom-scroll {
   scrollbar-width: thin;
   scrollbar-color: rgba(255,255,255,0.1) transparent;
+}
+
+/* StatusBadge 动画 */
+.status-badge {
+  animation: badge-appear 0.2s ease both;
+  display: inline-flex;
+  align-items: center;
+  font-family: "Consolas", "JetBrains Mono", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.status-badge.running, .status-badge.retrying {
+  animation: badge-appear 0.2s ease both, blink 1.4s ease-in-out infinite;
 }

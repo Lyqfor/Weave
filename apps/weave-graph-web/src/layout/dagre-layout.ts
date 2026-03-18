@@ -6,8 +6,8 @@
 import dagre from "dagre";
 import type { Edge, Node } from "reactflow";
 
-const NODE_WIDTH = 260;
-const NODE_HEIGHT = 80;
+const NODE_WIDTH = 240;
+const NODE_HEIGHT = 72;
 
 export function applyDagreLayout(
   nodes: Node[],
