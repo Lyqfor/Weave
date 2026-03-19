@@ -9,6 +9,58 @@
 
 ## 进度记录
 
+### 2026-03-19 - Entry 068 - 调度引擎重构：EngineContext/BaseNode 泛型化 + TurnEngineBusAdapter + 流式旁路
+
+#### 范围
+`src/engine/`（原 `src/runtime/`）、`src/nodes/`（原 `src/runtime/nodes/`）、`src/session/run-context.ts`、`src/agent/`、`src/llm/`、`src/event/`
+
+#### 改动
+- **`src/engine/engine-types.ts`（新建）**：
+  - `EngineContext` 接口：调度引擎最小依赖集（runId/dag/abortSignal/abortController/nodeRegistry/stateStore/snapshotStore/logger）
+  - ⛔️ 不含 `pendingRegistry`（Step Gate 人机交互层，禁止下沉到引擎层）
+- **`src/session/run-context.ts`**：
+  - `RunContext extends EngineContext`，移除与 EngineContext 重复字段
+  - `pendingRegistry?` 保留在 RunContext（Step Gate 层）
+- **`src/engine/dag-executor.ts`**：
+  - `executeDag(dag, ctx: EngineContext)` 收窄参数类型
+  - 删除 `ctx.pendingRegistry?.rejectAll(...)` 调用（引擎不再负责 Step Gate 清理）
+  - 新增 `WeaveDAGEngine` 类（面向对象封装）
+- **`src/nodes/base-node.ts`**：
+  - `BaseNode<C extends EngineContext = any>` 泛型化
+  - `execute(ctx: C)` / `doExecute(ctx: C)` / `transitionInDag(ctx: C)` / `broadcastIo(ctx: C)` 全泛型
+  - 拦截器/bus 通过 `(ctx as any)` 安全访问（仅 RunContext 场景持有）
+- **`src/nodes/llm-node.ts` / `tool-node.ts` / `final-node.ts`**：`extends BaseNode<RunContext>`
+- **`src/nodes/input-node.ts` / `repair-node.ts` / `attempt-node.ts` / `escalation-node.ts`**：`extends BaseNode<EngineContext>`
+- **`src/agent/turn-engine-bus-adapter.ts`（新建）**：
+  - `TurnEngineBusAdapter implements IEngineEventBus`
+  - 将 run-agent.ts 中 30 行内联匿名对象提升为具名类
+  - 实现 `onNodeStreamDelta`（流式旁路）
+- **`src/agent/run-agent.ts`**：
+  - 删除内联 `engineBus` 对象，替换为 `new TurnEngineBusAdapter(bus, runId, sessionId)`
+  - Layer 3 自绑定：`abortController.signal.addEventListener("abort", () => pendingRegistry.rejectAll(...))`
+- **`src/engine/engine-event-bus.ts`**：新增 `onNodeStreamDelta?(nodeId, chunkText): void`
+- **`src/llm/qwen-client.ts`**：
+  - `chatWithTools(input, options?: { onDelta? })` 新增流式路径
+  - 流式路径：逐 delta 回调 + 完整工具调用聚合（保证结构正确性）
+- **`src/nodes/llm-node.ts`**：`onDelta: (delta) => ctx.dag.getEngineEventBus()?.onNodeStreamDelta?.(this.id, delta)`
+- **`src/event/event-types.ts`**：新增 `engine.node.stream.delta` 事件类型
+- **目录迁移**：`src/runtime/` → `src/engine/`，`src/runtime/nodes/` → `src/nodes/`（删除全部 runtime/ 文件）
+- **`scripts/verify-dag-matrix.mjs`**：修复路径 `dist/runtime/` → `dist/engine/`，删除已废弃 WeavePlugin 引用
+
+#### 验证
+- 构建通过：`pnpm build`
+- Step Gate 回归通过：`node scripts/verify-step-gate.mjs`
+- DAG 语义回归通过：`node scripts/verify-dag-matrix.mjs`
+- 完整 P0 套件通过：`pnpm verify:p0`
+
+#### 待解决问题
+- `src/engine/dag-graph.ts` 中 `runner-types.ts` 迁移路径有 3 行差异（已在 chore 提交中处理）
+- `verify-dag-matrix.mjs` 的一致性测试删除了 WeavePlugin；若后续重新引入观察者插件需补充测试用例
+
+#### 下一步
+- Phase 1B 流式旁路可在 `pnpm dev:graph:all` 中验证（Web UI 节点实时显示 LLM 推理文字）
+- EngineContext 中 `nodeRegistry: Map<string, any>` 可在 TypeScript 5.x 中通过接口自引用改善类型精度
+
 ### 2026-03-17 - Entry 067 - 架构重构：单一执行路径 + 丰富钩子上下文 + TurnDAGBuilder
 
 #### 范围

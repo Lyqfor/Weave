@@ -25,13 +25,18 @@ dagent/
   src/
     agent/
       plugins/
-    runtime/
+    engine/
+    nodes/
+    session/
+    event/
     config/
     llm/
     tui/
     tools/
     weave/
+    utils/
     types/
+    errors/
     index.ts
   package.json
   tsconfig.json
@@ -72,10 +77,10 @@ dagent/
 - 基于 Ink（React for CLI）实现动态终端界面。
 - 通过事件网关监听 Runtime 事件并驱动细粒度 UI 状态更新。
 
-10. 运行器层（Runner Layer）
-- 提供执行内核抽象（legacy / dag）与选择器。
-- 当前默认走 legacy 运行器，保持行为兼容。
-- 为后续 DagRunner 渐进替换预留扩展位。
+10. 调度引擎层（Engine Layer）
+- 提供 DAG 执行内核（`executeDag`）与 `WeaveDAGEngine` 面向对象封装。
+- `EngineContext` 接口定义引擎最小依赖集（runId/dag/abortSignal 等），与智能体层解耦。
+- `TurnEngineBusAdapter` 将引擎事件桥接到 WeaveEventBus（Layer 3 适配器）。
 
 11. 二维图投影层（Graph Projection Layer）
 - 负责将 Runtime 原始事件归一化为图协议事件（node/edge/status/io）。
@@ -162,21 +167,58 @@ dagent/
 - `src/agent/message-dispatcher.ts`
   - 输入分发层：统一对用户输入做命令拦截、模式切换与问答消息分类。
   - 将控制命令（如 `/weave observe|auto|step|off`、`/q`）与问答执行解耦，避免 UI/入口层重复分支逻辑。
-- `src/runtime/runner-types.ts`
-  - 定义 Runner 抽象契约与运行参数类型（含 Step Gate 审批类型与 `autoMode` 开关）。
-- `src/runtime/runner-legacy.ts`
-  - legacy 运行器适配层：将执行请求委托给现有 Agent-loop。
-- `src/runtime/runner-dag.ts`
-  - Dag 运行器适配层：将执行请求委托给 DAG 执行内核。
-- `src/runtime/runner-selector.ts`
-  - 运行器选择器：按模式选择执行内核。
-  - 当前支持 `legacy` 与 `dag` 双运行器选择。
-- `src/runtime/dag-graph.ts`
+- `src/engine/engine-types.ts`
+  - `EngineContext` 接口：调度引擎最小依赖集（runId/dag/abortSignal/abortController/nodeRegistry/stateStore/snapshotStore/logger）。
+  - ⛔️ 不含 pendingRegistry（Step Gate 人机交互层，不得下沉到引擎层）。
+- `src/engine/dag-executor.ts`
+  - `executeDag(dag, ctx: EngineContext)` — DAG 主调度循环，Promise.all 并发 + AbortController 熔断。
+  - `WeaveDAGEngine` — 面向对象封装，便于依赖注入与单元测试。
+- `src/engine/engine-event-bus.ts`
+  - `IEngineEventBus` 接口：引擎事件总线（onNodeCreated/onEdgeCreated/onNodeTransition/onNodeIo/onSchedulerIssue/onNodeStreamDelta?）。
+  - 零外部依赖，实现由 Layer 3（TurnEngineBusAdapter）注入。
+- `src/engine/dag-graph.ts`
   - DAG 图模型：支持节点依赖、数据边、就绪判定、环路检测与状态机迁移约束。
-- `src/runtime/state-store.ts`
+  - 同时充当广播站：addNode/addEdge/transitionStatus 自动通过 IEngineEventBus 发射引擎事件。
+- `src/engine/state-store.ts`
   - 最小状态总线：管理运行上下文、节点输出与数据边输入解析。
-- `src/runtime/dag-event-contract.ts`
-  - DAG 事件契约与版本化策略定义（`weave.dag.event.v1`）。
+- `src/engine/runner-types.ts`
+  - 定义 Runner 抽象契约与运行参数类型（含 Step Gate 审批类型与 `autoMode` 开关）。
+- `src/engine/runner-legacy.ts`
+  - legacy 运行器适配层：将执行请求委托给现有 Agent-loop。
+- `src/engine/runner-dag.ts`
+  - Dag 运行器适配层：将执行请求委托给 DAG 执行内核。
+- `src/engine/runner-selector.ts`
+  - 运行器选择器：按模式选择执行内核。
+- `src/engine/snapshot-store.ts`
+  - 快照存储层：节点状态冻结/异步装配/落盘（回溯基础设施）。
+- `src/engine/blob-store.ts`
+  - BlobStore：大内容引用机制，防止节点端口数据膨胀。
+- `src/agent/turn-engine-bus-adapter.ts`
+  - `TurnEngineBusAdapter` — 将 `IEngineEventBus` 事件桥接到 `WeaveEventBus`（Layer 3 适配器）。
+  - 实现 `onNodeStreamDelta`：LLM 流式 delta 广播，供 Web UI 节点实时展示。
+- `src/nodes/base-node.ts`
+  - `BaseNode<C extends EngineContext = any>` 抽象基类，模板方法控制流（拦截器→执行→状态收口）。
+  - 泛型参数：LlmNode/ToolNode/FinalNode 使用 RunContext，容器节点使用 EngineContext。
+- `src/nodes/llm-node.ts`
+  - `LlmNode extends BaseNode<RunContext>`：LLM 推理决策节点，支持流式旁路 delta 广播。
+- `src/nodes/tool-node.ts`
+  - `ToolNode extends BaseNode<RunContext>`：工具调用节点，含重试链与 RepairNode/EscalationNode 子图。
+- `src/nodes/final-node.ts`
+  - `FinalNode extends BaseNode<RunContext>`：最终回答节点，负责流式输出文本。
+- `src/nodes/input-node.ts`
+  - `InputNode extends BaseNode<EngineContext>`：用户输入节点（DAG 起始点，已完成态）。
+- `src/nodes/repair-node.ts`
+  - `RepairNode extends BaseNode<EngineContext>`：参数修复 LLM 调用节点（可视化用）。
+- `src/nodes/attempt-node.ts`
+  - `AttemptNode extends BaseNode<EngineContext>`：工具重试执行尝试节点（可视化用）。
+- `src/nodes/escalation-node.ts`
+  - `EscalationNode extends BaseNode<EngineContext>`：重试耗尽升级节点（可视化用）。
+- `src/nodes/node-types.ts`
+  - 节点类型枚举、端口类型、错误/指标类型定义。
+- `src/nodes/safe-serialize.ts`
+  - `safeClone()` — 安全深拷贝（处理循环引用、BigInt 等不可序列化类型）。
+- `src/session/run-context.ts`
+  - `RunContext extends EngineContext`：DAG 节点执行上下文，叠加 LLM/工具/插件/Step Gate 层依赖。
 - `src/index.ts`
   - CLI 入口，启动 Ink TUI 多轮会话（单次命令常驻）。
   - 显式初始化 `MemoryStore` 并注入 Agent Runtime。
@@ -222,10 +264,6 @@ dagent/
 - `src/agent/plugins/agent-plugin.ts`
   - 定义 Agent-loop 插件接口、钩子上下文与插件输出结构。
   - 支持插件钩子返回单条或多条输出事件。
-- `src/weave/weave-plugin.ts`
-  - 实现 Weave 观察者插件：监听 Agent 原生动作并输出实时 DAG 事件。
-  - 输出双通道事件：`weave.dag.node`（节点状态）与 `weave.dag.detail`（节点过程明细）。
-  - 工具节点明细支持展示意图（intent）与目标（goal），提升节点可解释性。
 - `scripts/verify-dag-matrix.mjs`
   - DAG 语义测试矩阵脚本：覆盖环路、死锁、依赖缺失、重试、超时、审批中断恢复、一致性回归。
 - `src/weave/weave-dag-prompt.md`
