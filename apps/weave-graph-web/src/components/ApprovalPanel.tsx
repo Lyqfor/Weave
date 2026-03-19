@@ -3,18 +3,20 @@
  */
 
 import { useState } from "react";
+import { useGraphStore } from "../store/graph-store";
 
 interface ApprovalPanelProps {
   toolName: string;
   toolParams: string;
   gateId: string;
-  onAction: (action: "approve" | "edit" | "skip" | "abort", params?: string) => void;
 }
 
-export function ApprovalPanel({ toolName, toolParams, onAction }: ApprovalPanelProps) {
+export function ApprovalPanel({ toolName, toolParams, gateId }: ApprovalPanelProps) {
+  const sendRpc = useGraphStore((s) => s.sendRpc);
   const [editedParams, setEditedParams] = useState(tryPrettyJson(toolParams));
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [hasEdited, setHasEdited] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const validateJson = (text: string): boolean => {
     try {
@@ -24,6 +26,25 @@ export function ApprovalPanel({ toolName, toolParams, onAction }: ApprovalPanelP
     } catch {
       setJsonError("JSON 格式有误，请检查后重试");
       return false;
+    }
+  };
+
+  const handleAction = async (action: "approve" | "edit" | "skip" | "abort", params?: string) => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setJsonError(null);
+
+    try {
+      await sendRpc("gate.action", {
+        gateId,
+        action,
+        params
+      });
+      // 成功后由后端广播流更新状态，前端会自动感知并关闭此面板
+    } catch (err) {
+      setJsonError(String(err));
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -77,13 +98,14 @@ export function ApprovalPanel({ toolName, toolParams, onAction }: ApprovalPanelP
         <div className="inspector-group">
           <div className="inspector-label">调用参数（可编辑）</div>
           <textarea
-            className="approval-params-editor"
+            className={`approval-params-editor ${jsonError ? "error" : ""}`}
             value={editedParams}
             onChange={(e) => onParamsChange(e.target.value)}
             spellCheck={false}
             rows={10}
+            disabled={isSubmitting}
           />
-          {jsonError && <div className="approval-error">{jsonError}</div>}
+          {jsonError && <div className="approval-error">⚠️ {jsonError}</div>}
         </div>
       </div>
 
@@ -92,15 +114,16 @@ export function ApprovalPanel({ toolName, toolParams, onAction }: ApprovalPanelP
         <div className="approval-actions-primary">
           <button
             className="approval-btn approve"
-            onClick={() => onAction("approve")}
+            onClick={() => handleAction("approve")}
+            disabled={isSubmitting}
             title="直接放行，使用原始参数"
           >
-            ✅ 放行
+            {isSubmitting ? "⏳ 处理中..." : "✅ 放行"}
           </button>
           <button
             className="approval-btn edit"
-            onClick={() => { if (validateJson(editedParams)) onAction("edit", editedParams); }}
-            disabled={Boolean(jsonError) || !hasEdited}
+            onClick={() => { if (validateJson(editedParams)) handleAction("edit", editedParams); }}
+            disabled={Boolean(jsonError) || !hasEdited || isSubmitting}
             title="使用编辑后的参数放行"
           >
             ✏️ 编辑后放行
@@ -113,14 +136,16 @@ export function ApprovalPanel({ toolName, toolParams, onAction }: ApprovalPanelP
         <div className="approval-actions-danger">
           <button
             className="approval-btn skip"
-            onClick={() => onAction("skip")}
+            onClick={() => handleAction("skip")}
+            disabled={isSubmitting}
             title="跳过本次工具调用"
           >
             ⏭ 跳过
           </button>
           <button
             className="approval-btn abort"
-            onClick={() => onAction("abort")}
+            onClick={() => handleAction("abort")}
+            disabled={isSubmitting}
             title="终止本轮执行"
           >
             🛑 终止

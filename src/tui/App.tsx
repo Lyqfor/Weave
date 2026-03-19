@@ -171,15 +171,17 @@ export function App(props: AppProps): React.ReactElement {
                           ...(ingestToken ? { "x-graph-token": ingestToken } : {})
                         },
                         body: JSON.stringify({
-                          runId: lastRunIdRef.current,
-                          type: "tool.gate.pending",
-                          timestamp: new Date().toISOString(),
-                          payload: {
-                            toolCallId: request.toolCallId,
-                            toolName: request.toolName,
-                            toolParams: request.argsText || "{}"
-                          }
+                        runId: lastRunIdRef.current,
+                        type: "tool.gate.pending",
+                        timestamp: new Date().toISOString(),
+                        payload: {
+                          toolCallId: request.toolCallId,
+                          nodeId: request.nodeId,
+                          toolName: request.toolName,
+                          toolParams: request.argsText || "{}"
+                        }
                         })
+
                       }).catch(() => { /* 忽略网络错误 */ });
 
                       // 轮询服务端获取 Web 前端的审批决策
@@ -187,7 +189,7 @@ export function App(props: AppProps): React.ReactElement {
                         clearInterval(webPollTimerRef.current);
                       }
                       webPollTimerRef.current = setInterval(() => {
-                        void fetch(`${serverBase}/api/gate/decision/${request.toolCallId}`, {
+                        void fetch(`${serverBase}/api/gate/decision/${request.nodeId}`, {
                           headers: ingestToken ? { "x-graph-token": ingestToken } : {}
                         }).then(async (resp) => {
                           if (resp.status === 200) {
@@ -196,10 +198,30 @@ export function App(props: AppProps): React.ReactElement {
                               clearInterval(webPollTimerRef.current!);
                               webPollTimerRef.current = null;
                               // 通知服务端已消费决策
-                              void fetch(`${serverBase}/api/gate/decision/${request.toolCallId}`, {
+                              void fetch(`${serverBase}/api/gate/decision/${request.nodeId}`, {
                                 method: "DELETE",
                                 headers: ingestToken ? { "x-graph-token": ingestToken } : {}
                               }).catch(() => { /* 忽略 */ });
+
+                              // 发送 tool.gate.resolved 到图服务器，让 Web 端节点状态同步流转
+                              void fetch(ingestUrl, {
+                                method: "POST",
+                                headers: {
+                                  "content-type": "application/json",
+                                  ...(ingestToken ? { "x-graph-token": ingestToken } : {})
+                                },
+                                body: JSON.stringify({
+                                  runId: lastRunIdRef.current,
+                                  type: "tool.gate.resolved",
+                                  timestamp: new Date().toISOString(),
+                                  payload: {
+                                    toolCallId: request.toolCallId,
+                                    nodeId: request.nodeId,
+                                    action: data.action
+                                  }
+                                })
+                              }).catch(() => { /* 忽略 */ });
+
                               const resolver = approvalResolverRef.current;
                               approvalResolverRef.current = null;
                               setPendingApproval(null);
@@ -443,6 +465,27 @@ export function App(props: AppProps): React.ReactElement {
       const lower = value.toLowerCase();
       if (key.return) {
         cancelWebPoll();
+        const ingestUrl = process.env.WEAVE_GRAPH_INGEST_URL?.trim() ?? "";
+        const ingestToken = process.env.WEAVE_GRAPH_TOKEN?.trim() ?? "";
+        if (ingestUrl) {
+          void fetch(ingestUrl, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(ingestToken ? { "x-graph-token": ingestToken } : {})
+            },
+            body: JSON.stringify({
+              runId: lastRunIdRef.current,
+              type: "tool.gate.resolved",
+              timestamp: new Date().toISOString(),
+              payload: {
+                toolCallId: pendingApproval.toolCallId,
+                nodeId: activeDagNodeId,
+                action: "approve"
+              }
+            })
+          }).catch(() => {});
+        }
         approvalResolverRef.current?.({ action: "approve" });
         approvalResolverRef.current = null;
         setPendingApproval(null);
@@ -460,6 +503,27 @@ export function App(props: AppProps): React.ReactElement {
 
       if (lower === "s") {
         cancelWebPoll();
+        const ingestUrl = process.env.WEAVE_GRAPH_INGEST_URL?.trim() ?? "";
+        const ingestToken = process.env.WEAVE_GRAPH_TOKEN?.trim() ?? "";
+        if (ingestUrl) {
+          void fetch(ingestUrl, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(ingestToken ? { "x-graph-token": ingestToken } : {})
+            },
+            body: JSON.stringify({
+              runId: lastRunIdRef.current,
+              type: "tool.gate.resolved",
+              timestamp: new Date().toISOString(),
+              payload: {
+                toolCallId: pendingApproval.toolCallId,
+                nodeId: activeDagNodeId,
+                action: "skip"
+              }
+            })
+          }).catch(() => {});
+        }
         approvalResolverRef.current?.({ action: "skip" });
         approvalResolverRef.current = null;
         setPendingApproval(null);
@@ -469,6 +533,27 @@ export function App(props: AppProps): React.ReactElement {
 
       if (lower === "q") {
         cancelWebPoll();
+        const ingestUrl = process.env.WEAVE_GRAPH_INGEST_URL?.trim() ?? "";
+        const ingestToken = process.env.WEAVE_GRAPH_TOKEN?.trim() ?? "";
+        if (ingestUrl) {
+          void fetch(ingestUrl, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(ingestToken ? { "x-graph-token": ingestToken } : {})
+            },
+            body: JSON.stringify({
+              runId: lastRunIdRef.current,
+              type: "tool.gate.resolved",
+              timestamp: new Date().toISOString(),
+              payload: {
+                toolCallId: pendingApproval.toolCallId,
+                nodeId: activeDagNodeId,
+                action: "abort"
+              }
+            })
+          }).catch(() => {});
+        }
         approvalResolverRef.current?.({ action: "abort" });
         approvalResolverRef.current = null;
         setPendingApproval(null);

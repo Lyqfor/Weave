@@ -7,7 +7,7 @@
 
 import type { INodeInterceptor, InterceptDecision } from "./interceptor.js";
 import type { PendingPromiseRegistry } from "./pending-promise-registry.js";
-import type { BaseNode } from "../runtime/nodes/base-node.js";
+import type { BaseNode } from "../nodes/base-node.js";
 import type { RunContext } from "../session/run-context.js";
 import { summarizeText, safeJsonStringify } from "../utils/text-utils.js";
 
@@ -35,6 +35,7 @@ export class StepGateInterceptor implements INodeInterceptor {
     ctx.bus.dispatch("node.pending_approval", {
       sessionId: ctx.sessionId,
       turnIndex: ctx.turnIndex,
+      nodeId: node.id,
       toolName,
       toolCallId,
       toolArgsText: summarizeText(effectiveArgs),
@@ -50,6 +51,7 @@ export class StepGateInterceptor implements INodeInterceptor {
         step,
         toolName,
         toolCallId,
+        nodeId: node.id,
         args: effectiveArgs,
         argsText: safeJsonStringify(effectiveArgs)
       });
@@ -68,6 +70,7 @@ export class StepGateInterceptor implements INodeInterceptor {
     ctx.bus.dispatch("node.approval.resolved", {
       sessionId: ctx.sessionId,
       turnIndex: ctx.turnIndex,
+      nodeId: node.id,
       toolName,
       toolCallId,
       approvalAction: decision.action,

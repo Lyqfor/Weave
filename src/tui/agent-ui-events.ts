@@ -62,12 +62,14 @@ interface WeaveDagEnvelope {
 
 export interface ApprovalPendingEvent {
   runId: string;
+  nodeId: string;
   toolName: string;
   toolCallId: string;
 }
 
 export interface ApprovalResolvedEvent {
   runId: string;
+  nodeId: string;
   toolName: string;
   toolCallId: string;
   action: "approve" | "edit" | "skip" | "abort";
@@ -131,6 +133,7 @@ export class AgentUiEventGateway extends EventEmitter {
     if (event.type === "node.pending_approval") {
       this.emit("approval:pending", {
         runId: event.runId,
+        nodeId: event.payload?.nodeId ?? "",
         toolName: event.payload?.toolName ?? "unknown",
         toolCallId: event.payload?.toolCallId ?? ""
       } satisfies ApprovalPendingEvent);
@@ -140,6 +143,7 @@ export class AgentUiEventGateway extends EventEmitter {
     if (event.type === "node.approval.resolved") {
       this.emit("approval:resolved", {
         runId: event.runId,
+        nodeId: event.payload?.nodeId ?? "",
         toolName: event.payload?.toolName ?? "unknown",
         toolCallId: event.payload?.toolCallId ?? "",
         action: event.payload?.approvalAction ?? "approve"

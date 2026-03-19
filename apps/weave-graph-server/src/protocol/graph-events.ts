@@ -25,5 +25,8 @@ export {
   type GraphNodeData,
   type NodePendingApprovalPayload,
   type NodeApprovalResolvedPayload,
-  type GateActionMessage
+  type GateActionMessage,
+  type ClientMessageEnvelope,
+  type ServerResponseMessageEnvelope,
+  type GateActionPayload
 } from "../../../shared/graph-protocol.js";

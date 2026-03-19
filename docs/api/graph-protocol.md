@@ -95,38 +95,84 @@ interface GraphPort {
 
 ---
 
-## 三、上行指令流（Client → Server）
+## 三、上行指令流与 RPC 响应（Client ↔ Server）
 
-客户端通过 WebSocket 发送 JSON 指令：
+为了支持复杂的前端操作（如带二次校验的参数编辑、快照回溯等），Web 前端与后端网关采用具有生命周期的 RPC (请求-响应) 模式进行通信。
 
-### 3.1 Step Gate 审批
+### 3.1 统一的上行 RPC 请求信封 (Client → Server)
+
+客户端发送控制指令时，必须使用 `ClientMessageEnvelope` 封装：
 
 ```typescript
-interface GateActionCommand {
-  type: "gate.action";
-  toolCallId: string;            // 对应 node.pending_approval 中的 toolCallId
+interface ClientMessageEnvelope<T = unknown> {
+  type: "gate.action" | "node.update_params" | "command.fork" | "snapshot.query";
+  reqId?: string;        // 客户端请求ID（UUID），用于关联后端的 Response
+  payload: T;
+}
+```
+
+### 3.2 统一的下行响应信封 (Server → Client)
+
+后端处理带有 `reqId` 的请求后，返回对应的响应信封（注意：这不是图状态事件，而是纯粹的控制流响应）：
+
+```typescript
+interface ServerResponseMessageEnvelope<T = unknown> {
+  schemaVersion: "weave.graph.v1";
+  eventType: "server.response";
+  reqId: string;         // 原样返回客户端请求时的 reqId
+  ok: boolean;           // 成功标识
+  error?: string;        // 错误详情（如校验失败原因）
+  payload?: T;           // 成功时的返回数据
+}
+```
+
+### 3.3 核心指令 Payload 定义
+
+#### 3.3.1 审批操作 (gate.action)
+
+兼容旧版的工具审批操作，目前已作为 RPC 消息的一部分进行处理。
+
+```typescript
+// 触发 type: "gate.action"
+interface GateActionPayload {
+  gateId: string;            // 对应 node.pending_approval 中的 toolCallId
   action: "approve" | "edit" | "skip" | "abort";
-  editedArgs?: Record<string, unknown>;  // action="edit" 时携带修改后的参数
+  params?: string;           // action="edit" 时携带修改后的参数 JSON 字符串
 }
 ```
 
-示例：
-```json
-{
-  "type": "gate.action",
-  "toolCallId": "call_abc123",
-  "action": "approve"
-}
-```
+**交互示例 (二次校验)：**
+1. 客户端发送：
+   ```json
+   {
+     "type": "gate.action",
+     "reqId": "uuid-1234",
+     "payload": {
+       "gateId": "call_abc123",
+       "action": "edit",
+       "params": "{\"invalid\": true}"
+     }
+   }
+   ```
+2. 服务端进行参数二次校验。若失败，返回：
+   ```json
+   {
+     "schemaVersion": "weave.graph.v1",
+     "eventType": "server.response",
+     "reqId": "uuid-1234",
+     "ok": false,
+     "error": "Schema validation failed..."
+   }
+   ```
+   前端收到后拦截 Promise，在 UI 渲染错误，等待用户重新提交。
 
-### 3.2 预留扩展点
+#### 3.3.2 预留扩展点
 
 ```typescript
 // 未来：分叉重跑某个节点
-interface CommandFork {
-  type: "command.fork";
+interface CommandForkPayload {
   nodeId: string;
-  fromSnapshot?: string;  // 快照 ID，用于回溯重跑
+  snapshotId: string;  // 快照 ID，用于回溯重跑
 }
 ```
 

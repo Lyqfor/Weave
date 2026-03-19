@@ -137,30 +137,28 @@ export function useWeaveDagState(gateway: AgentUiEventGateway): WeaveDagNodeItem
       return index >= 0 ? { node: target, index } : null;
     };
 
-    const onApprovalPending = (_event: ApprovalPendingEvent): void => {
+    const onApprovalPending = (event: ApprovalPendingEvent): void => {
       const now = Date.now();
       setNodes((prev) => {
-        if (prev.length === 0) return prev;
-        const found = findActiveNode(prev);
-        if (!found || prev[found.index].pausedAtMs) return prev;
+        const index = prev.findIndex((node) => node.id === event.nodeId);
+        if (index < 0 || prev[index].pausedAtMs) return prev;
         const next = [...prev];
-        next[found.index] = { ...next[found.index], pausedAtMs: now, updatedAtMs: now };
+        next[index] = { ...next[index], pausedAtMs: now, updatedAtMs: now };
         return next;
       });
     };
 
-    const onApprovalResolved = (_event: ApprovalResolvedEvent): void => {
+    const onApprovalResolved = (event: ApprovalResolvedEvent): void => {
       const now = Date.now();
       setNodes((prev) => {
-        if (prev.length === 0) return prev;
-        const found = findActiveNode(prev);
-        if (!found || !prev[found.index].pausedAtMs) return prev;
-        const pausedMs = Math.max(0, now - (prev[found.index].pausedAtMs as number));
+        const index = prev.findIndex((node) => node.id === event.nodeId);
+        if (index < 0 || !prev[index].pausedAtMs) return prev;
+        const pausedMs = Math.max(0, now - (prev[index].pausedAtMs as number));
         const next = [...prev];
-        next[found.index] = {
-          ...next[found.index],
+        next[index] = {
+          ...next[index],
           pausedAtMs: undefined,
-          pausedDurationMs: (next[found.index].pausedDurationMs ?? 0) + pausedMs,
+          pausedDurationMs: (next[index].pausedDurationMs ?? 0) + pausedMs,
           updatedAtMs: now
         };
         return next;

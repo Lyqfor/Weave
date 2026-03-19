@@ -200,12 +200,34 @@ export interface NodeApprovalResolvedPayload {
   action: "approve" | "edit" | "skip" | "abort";
 }
 
-/** 前端向服务器发送的审批操作消息 */
-export interface GateActionMessage {
-  type: "gate.action";
+/** 前端向服务端发送的 RPC 请求信封 */
+export interface ClientMessageEnvelope<T = unknown> {
+  type: "gate.action" | "node.update_params" | "command.fork" | "snapshot.query";
+  reqId?: string;
+  payload: T;
+}
+
+/** 服务端对前端 RPC 请求的响应信封 */
+export interface ServerResponseMessageEnvelope<T = unknown> {
+  schemaVersion: typeof GRAPH_SCHEMA_VERSION;
+  eventType: "server.response";
+  reqId: string;
+  ok: boolean;
+  error?: string;
+  payload?: T;
+}
+
+/** 审批操作负载 */
+export interface GateActionPayload {
   gateId: string;
   action: "approve" | "edit" | "skip" | "abort";
   params?: string;
+}
+
+/** 兼容旧版的审批操作消息（逐步迁移到 ClientMessageEnvelope） */
+export interface GateActionMessage extends GateActionPayload {
+  type: "gate.action";
+  reqId?: string; // 加入 reqId 以支持 RPC 响应
 }
 
 /** 前端节点数据（ReactFlow 节点使用） */

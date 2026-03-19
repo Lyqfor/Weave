@@ -9,6 +9,17 @@ async function main(): Promise<void> {
   const projector = new GraphProjector();
   const gateway = await createGraphGateway();
 
+  // 注册二次校验钩子 (Double Validation)
+  // 后续可进一步接入 ToolRegistry 进行 Schema 校验
+  gateway.registerValidationHandler(async (nodeId, params) => {
+    try {
+      JSON.parse(params);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: `后端校验失败：无效的 JSON 格式 (${String(e)})` };
+    }
+  });
+
   console.log(`[graph-server] ws://127.0.0.1:${gateway.port}/?token=${gateway.token}`);
   console.log(`[graph-server] ingest=${gateway.ingestUrl} token=${gateway.token}`);
 

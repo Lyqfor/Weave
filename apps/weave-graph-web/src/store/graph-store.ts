@@ -41,7 +41,31 @@ interface GraphState {
   selectNode: (nodeId?: string) => void;
   applyActiveNodeChanges: (changes: NodeChange[]) => void;
   clearPendingApproval: () => void;
+  sendRpc: <T = unknown>(type: string, payload: unknown) => Promise<T>;
 }
+
+// ─── 全局 RPC 状态 ──────────────────────────────────────────────────────────
+
+const pendingRequests = new Map<string, {
+  resolve: (data: any) => void;
+  reject: (err: string) => void;
+  timer: number;
+}>();
+
+/** 暴露给 App.tsx 处理 WS 返回消息 */
+export const resolveRpc = (reqId: string, ok: boolean, error?: string, payload?: any) => {
+  const req = pendingRequests.get(reqId);
+  if (!req) return;
+  
+  clearTimeout(req.timer);
+  pendingRequests.delete(reqId);
+  
+  if (ok) {
+    req.resolve(payload);
+  } else {
+    req.reject(error || "Unknown RPC error");
+  }
+};
 
 export const useGraphStore = create<GraphState>((set, get) => ({
   dags: {},
@@ -295,6 +319,24 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   },
   clearPendingApproval() {
     set({ pendingApprovalNodeId: null, pendingApprovalPayload: null });
+  },
+  async sendRpc(type, payload) {
+    const reqId = crypto.randomUUID();
+    const envelope = { type, reqId, payload };
+
+    return new Promise((resolve, reject) => {
+      // 触发自定义事件，由 App.tsx 中的 WebSocket 监听并发送
+      window.dispatchEvent(new CustomEvent("weave:rpc:send", { detail: { envelope } }));
+
+      const timer = window.setTimeout(() => {
+        if (pendingRequests.has(reqId)) {
+          pendingRequests.delete(reqId);
+          reject("RPC Timeout");
+        }
+      }, 15000);
+
+      pendingRequests.set(reqId, { resolve, reject, timer });
+    });
   }
 }));
 

@@ -4,7 +4,7 @@
  * 拦截器决策通过 switch 穷举 + default 拦截，拒绝所有未知/畸形指令。
  */
 
-import type { BaseNode } from "../runtime/nodes/base-node.js";
+import type { BaseNode } from "../nodes/base-node.js";
 import type { RunContext } from "../session/run-context.js";
 
 export interface InterceptDecision {

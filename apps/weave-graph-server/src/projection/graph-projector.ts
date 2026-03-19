@@ -293,21 +293,29 @@ export class GraphProjector {
     // ── Step Gate 事件 ────────────────────────────────────────────────────────
     if (event.type === "tool.gate.pending") {
       const toolCallId = this.stringValue(event.payload?.toolCallId);
+      const nodeId = this.stringValue(event.payload?.nodeId);
       const toolName = this.stringValue(event.payload?.toolName) || "unknown";
       const toolParams = this.stringValue(event.payload?.toolParams) || "{}";
+
       if (toolCallId) {
-        const gateNodeId = `gate:${toolCallId.slice(-8)}`;
-        out.push(this.wrap<NodeUpsertPayload>(event.runId, "node.upsert", event.timestamp, {
-          nodeId: gateNodeId,
-          kind: "gate",
-          title: `Step Gate · ${toolName}`
-        }));
+        const targetNodeId = nodeId || `gate:${toolCallId.slice(-8)}`;
+
+        // 如果没有提供明确的 nodeId，则回退到创建 Gate 节点的旧逻辑（向后兼容）
+        if (!nodeId) {
+          out.push(this.wrap<NodeUpsertPayload>(event.runId, "node.upsert", event.timestamp, {
+            nodeId: targetNodeId,
+            kind: "gate",
+            title: `Step Gate · ${toolName}`
+          }));
+        }
+
+        // 统一：将目标节点（原节点或 Gate 节点）设为等待状态，并挂载审批元数据
         out.push(this.wrap<NodeStatusPayload>(event.runId, "node.status", event.timestamp, {
-          nodeId: gateNodeId,
-          status: "running"
+          nodeId: targetNodeId,
+          status: "blocked"
         }));
         out.push(this.wrap<NodePendingApprovalPayload>(event.runId, "node.pending_approval", event.timestamp, {
-          nodeId: gateNodeId,
+          nodeId: targetNodeId,
           toolName,
           toolParams
         }));
@@ -316,21 +324,23 @@ export class GraphProjector {
 
     if (event.type === "tool.gate.resolved") {
       const toolCallId = this.stringValue(event.payload?.toolCallId);
+      const nodeId = this.stringValue(event.payload?.nodeId);
       const action = this.stringValue(event.payload?.action) as "approve" | "edit" | "skip" | "abort";
+
       if (toolCallId) {
-        const gateNodeId = `gate:${toolCallId.slice(-8)}`;
+        const targetNodeId = nodeId || `gate:${toolCallId.slice(-8)}`;
         const statusMap: Record<string, NodeStatusPayload["status"]> = {
-          approve: "success",
-          edit: "success",
+          approve: "running", // 审批通过后应恢复为 running 状态
+          edit: "running",
           skip: "skipped",
           abort: "fail"
         };
         out.push(this.wrap<NodeStatusPayload>(event.runId, "node.status", event.timestamp, {
-          nodeId: gateNodeId,
+          nodeId: targetNodeId,
           status: statusMap[action] ?? "success"
         }));
         out.push(this.wrap<NodeApprovalResolvedPayload>(event.runId, "node.approval.resolved", event.timestamp, {
-          nodeId: gateNodeId,
+          nodeId: targetNodeId,
           action
         }));
       }

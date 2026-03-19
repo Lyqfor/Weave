@@ -4,7 +4,7 @@
  */
 
 import type { InterceptDecision } from "./interceptor.js";
-import type { BaseNode } from "../runtime/nodes/base-node.js";
+import type { BaseNode } from "../nodes/base-node.js";
 
 interface PendingEntry {
   resolve: (decision: InterceptDecision) => void;

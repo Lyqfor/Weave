@@ -125,7 +125,7 @@ export async function repairToolArgsByIntent(
   ].join("\n");
 
   const raw = await chatFn({
-    systemPrompt,
+    systemPrompt: "", // 工具修复不需要系统提示词
     userMessage: repairPrompt
   });
 

@@ -17,9 +17,9 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import "./app.css";
-import { useGraphStore, portContentToString } from "./store/graph-store";
+import { useGraphStore, portContentToString, resolveRpc } from "./store/graph-store";
 import { applyDagreLayoutAsync } from "./layout/dagre-layout";
-import type { GateActionMessage, GraphEnvelope, GraphNodeData, GraphPort } from "./types/graph-events";
+import type { GraphEnvelope, GraphNodeData, GraphPort } from "./types/graph-events";
 import { SemanticNode } from "./nodes/semantic-node";
 import { FlowEdge } from "./edges/FlowEdge";
 import { ApprovalPanel } from "./components/ApprovalPanel";
@@ -230,11 +230,29 @@ function GraphCanvas() {
     ws.onerror = () => setWsStatus("disconnected");
 
     ws.onmessage = (message) => {
-      const evt = JSON.parse(String(message.data)) as GraphEnvelope<unknown>;
-      applyEnvelope(evt);
+      try {
+        const data = JSON.parse(String(message.data));
+        // 轨道区分：server.response (RPC) vs 广播 (Graph)
+        if (data.eventType === "server.response") {
+          resolveRpc(data.reqId, data.ok, data.error, data.payload);
+        } else {
+          applyEnvelope(data);
+        }
+      } catch (e) {
+        console.error("Failed to parse WS message", e);
+      }
     };
 
+    const handleRpcSend = (e: any) => {
+      const { envelope } = e.detail;
+      if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify(envelope));
+      }
+    };
+    window.addEventListener("weave:rpc:send", handleRpcSend);
+
     return () => {
+      window.removeEventListener("weave:rpc:send", handleRpcSend);
       wsRef.current = null;
       ws.close();
     };
@@ -310,17 +328,6 @@ function GraphCanvas() {
     userInteractedRef.current = false;
   };
 
-  const handleApprovalAction = useCallback(
-    (action: "approve" | "edit" | "skip" | "abort", params?: string) => {
-      if (!wsRef.current || !pendingApprovalNodeId) return;
-
-      const msg: GateActionMessage = { type: "gate.action", gateId: pendingApprovalNodeId, action, params };
-      wsRef.current.send(JSON.stringify(msg));
-      clearPendingApproval();
-    },
-    [pendingApprovalNodeId, clearPendingApproval]
-  );
-
   const displayedNodes = layoutedNodes.length > 0 ? layoutedNodes : semanticNodes;
 
   const emptyCanvasNode = displayedNodes;
@@ -350,7 +357,6 @@ function GraphCanvas() {
             toolName={selectedNode.data.approvalPayload.toolName}
             toolParams={selectedNode.data.approvalPayload.toolParams}
             gateId={selectedNode.id}
-            onAction={handleApprovalAction}
           />
           <NodeDetailSection node={selectedNode} />
         </div>
@@ -362,7 +368,7 @@ function GraphCanvas() {
         <NodeDetailSection node={selectedNode} />
       </div>
     );
-  }, [selectedNode, handleApprovalAction]);
+  }, [selectedNode]);
 
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
@@ -485,7 +491,7 @@ function GraphCanvas() {
             </>
           ) : (
             <span style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.06em" }}>
-              🌌 WEAVE Graph
+              🌌 Weave Graph
             </span>
           )}
         </div>

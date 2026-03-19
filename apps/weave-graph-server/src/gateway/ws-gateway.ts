@@ -9,7 +9,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import express from "express";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { GraphEnvelope } from "../protocol/graph-events.js";
+import {
+  type GraphEnvelope,
+  type ClientMessageEnvelope,
+  type ServerResponseMessageEnvelope,
+  GRAPH_SCHEMA_VERSION,
+  type GateActionPayload
+} from "../protocol/graph-events.js";
 import type { RuntimeRawEvent } from "../projection/graph-projector.js";
 
 export interface GateDecision {
@@ -17,12 +23,15 @@ export interface GateDecision {
   params?: string;
 }
 
+export type ValidationHandler = (nodeId: string, params: string) => Promise<{ ok: boolean; error?: string }>;
+
 export interface GraphGateway {
   port: number;
   token: string;
   ingestUrl: string;
   publish(event: GraphEnvelope<unknown>): void;
   registerRuntimeIngestHandler(handler: (event: RuntimeRawEvent) => void): void;
+  registerValidationHandler(handler: ValidationHandler): void;
   getGateDecision(gateId: string): GateDecision | undefined;
   clearGateDecision(gateId: string): void;
   close(): Promise<void>;
@@ -38,6 +47,8 @@ export async function createGraphGateway(staticDir?: string): Promise<GraphGatew
 
   const token = randomBytes(16).toString("hex");
   let runtimeIngestHandler: ((event: RuntimeRawEvent) => void) | null = null;
+  let validationHandler: ValidationHandler = async () => ({ ok: true });
+
   // 存储来自 Web 前端的 gate 审批决策，key=gateId（即 toolCallId）
   const pendingGateDecisions = new Map<string, GateDecision>();
 
@@ -113,6 +124,20 @@ export async function createGraphGateway(staticDir?: string): Promise<GraphGatew
   const wss = new WebSocketServer({ noServer: true });
   const clients = new Set<WebSocket>();
 
+  // 辅助函数：发送 RPC 响应
+  const sendResponse = (ws: WebSocket, reqId: string, ok: boolean, error?: string, payload?: unknown) => {
+    if (ws.readyState !== ws.OPEN) return;
+    const response: ServerResponseMessageEnvelope = {
+      schemaVersion: GRAPH_SCHEMA_VERSION,
+      eventType: "server.response",
+      reqId,
+      ok,
+      error,
+      payload
+    };
+    ws.send(JSON.stringify(response));
+  };
+
   httpServer.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const incomingToken = url.searchParams.get("token") ?? "";
@@ -147,20 +172,53 @@ export async function createGraphGateway(staticDir?: string): Promise<GraphGatew
       }
     }, 10_000);
 
-    // 接收来自前端的消息（主要是 gate.action 审批操作）
-    ws.on("message", (raw) => {
+    // 接收来自前端的消息（RPC 模式或旧版直接发送）
+    ws.on("message", async (raw) => {
       try {
-        const msg = JSON.parse(String(raw)) as { type?: string; gateId?: string; action?: string; params?: string };
+        const rawData = JSON.parse(String(raw));
+
+        // 路径 A: 新版 RPC 信封 (ClientMessageEnvelope)
+        if (rawData.type && rawData.payload !== undefined) {
+          const msg = rawData as ClientMessageEnvelope<any>;
+          const { type, reqId, payload } = msg;
+
+          if (type === "gate.action") {
+            const gatePayload = payload as GateActionPayload;
+            const { gateId, action, params } = gatePayload;
+
+            // 二次校验拦截 (Double Validation)
+            if (action === "edit" && params) {
+              const valResult = await validationHandler(gateId, params);
+              if (!valResult.ok) {
+                if (reqId) sendResponse(ws, reqId, false, valResult.error);
+                return;
+              }
+            }
+
+            const decision: GateDecision = { action, params };
+            pendingGateDecisions.set(gateId, decision);
+            console.log(`[graph-server] RPC gate.action received gateId=${gateId} action=${action}`);
+
+            if (reqId) sendResponse(ws, reqId, true);
+          } else {
+            console.warn(`[graph-server] Unknown RPC message type: ${type}`);
+            if (reqId) sendResponse(ws, reqId, false, `Unknown command: ${type}`);
+          }
+          return;
+        }
+
+        // 路径 B: 兼容旧版散装 JSON (向后兼容)
+        const msg = rawData as { type?: string; gateId?: string; action?: string; params?: string };
         if (msg.type === "gate.action" && msg.gateId && msg.action) {
           const decision: GateDecision = {
             action: msg.action as GateDecision["action"],
             params: msg.params
           };
           pendingGateDecisions.set(msg.gateId, decision);
-          console.log(`[graph-server] gate.action received gateId=${msg.gateId} action=${msg.action}`);
+          console.log(`[graph-server] legacy gate.action received gateId=${msg.gateId} action=${msg.action}`);
         }
-      } catch {
-        // 忽略非 JSON 消息
+      } catch (e) {
+        console.error(`[graph-server] Failed to parse message: ${String(e)}`);
       }
     });
 
@@ -193,6 +251,9 @@ export async function createGraphGateway(staticDir?: string): Promise<GraphGatew
     },
     registerRuntimeIngestHandler(handler) {
       runtimeIngestHandler = handler;
+    },
+    registerValidationHandler(handler) {
+      validationHandler = handler;
     },
     getGateDecision(gateId) {
       return pendingGateDecisions.get(gateId);
