@@ -248,7 +248,7 @@ export class ToolNode extends BaseNode {
 
         const repairedArgs = (repairResult.repairedArgs ?? effectiveArgs) as Record<string, unknown>;
         repairNode.setRepaired(repairedArgs);
-        ctx.dag.addNode({ id: repairNode.id, type: "repair", status: "success" });
+        ctx.dag.addNode({ id: repairNode.id, type: "repair", status: "success" }, repairNode.freezeSnapshot());
         ctx.dag.addEdge(prevNodeId, repairNode.id);
         prevNodeId = repairNode.id;
 
@@ -309,7 +309,7 @@ export class ToolNode extends BaseNode {
           retryNode.markFailed({ name: "ToolError", message: String(finalResult.content) });
         }
         const retryStatus = finalResult.ok ? "success" : "fail";
-        ctx.dag.addNode({ id: retryNode.id, type: "tool", status: retryStatus });
+        ctx.dag.addNode({ id: retryNode.id, type: "tool", status: retryStatus }, retryNode.freezeSnapshot());
         ctx.dag.addEdge(prevNodeId, retryNode.id);
         prevNodeId = retryNode.id;
       }

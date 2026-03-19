@@ -61,6 +61,112 @@ export class GraphProjector {
       this.completedAtByRun.set(event.runId, Date.now());
     }
 
+    // ── engine.* 事件：DagGraph 广播站直接发射，无需 plugin.output 包装 ──────
+
+    if (event.type === "engine.node.created") {
+      const nodeId = this.stringValue(event.payload?.nodeId);
+      const nodeType = this.stringValue(event.payload?.nodeType);
+      const frozen = (event.payload?.payload ?? {}) as Record<string, unknown>;
+      if (nodeId) {
+        const kind = (frozen.kind ?? nodeType) as NodeKind;
+        const title = this.stringValue(frozen.title) || nodeId;
+        out.push(this.wrap<NodeUpsertPayload>(event.runId, "node.upsert", event.timestamp, {
+          nodeId,
+          parentId: frozen.parentId ? String(frozen.parentId) : undefined,
+          kind: kind as NodeKind,
+          title,
+          tags: Array.isArray(frozen.tags) ? (frozen.tags as string[]) : undefined,
+          dependencies: Array.isArray(frozen.dependencies) ? (frozen.dependencies as string[]) : undefined
+        }));
+        out.push(this.wrap<NodeStatusPayload>(event.runId, "node.status", event.timestamp, {
+          nodeId,
+          status: this.toNodeStatus(this.stringValue(frozen.status) || "pending")
+        }));
+        if (frozen.inputPorts || frozen.outputPorts || frozen.error || frozen.metrics) {
+          out.push(this.wrap<NodeIoPayload>(event.runId, "node.io", event.timestamp, {
+            nodeId,
+            inputPorts: frozen.inputPorts as BaseNodePayload["inputPorts"],
+            outputPorts: frozen.outputPorts as BaseNodePayload["outputPorts"],
+            error: frozen.error as BaseNodePayload["error"],
+            metrics: frozen.metrics as BaseNodePayload["metrics"]
+          }));
+        }
+      }
+    }
+
+    if (event.type === "engine.edge.created") {
+      const fromId = this.stringValue(event.payload?.fromId);
+      const toId = this.stringValue(event.payload?.toId);
+      const kind = this.stringValue(event.payload?.kind) || "dependency";
+      if (fromId && toId) {
+        const edgeId = `${fromId}->${toId}:${kind}`;
+        out.push(this.wrap<EdgeUpsertPayload>(event.runId, "edge.upsert", event.timestamp, {
+          edgeId,
+          source: fromId,
+          target: toId,
+          edgeKind: kind as EdgeUpsertPayload["edgeKind"]
+        }));
+      }
+    }
+
+    if (event.type === "engine.data.edge.created") {
+      const fromNodeId = this.stringValue(event.payload?.fromNodeId);
+      const toNodeId = this.stringValue(event.payload?.toNodeId);
+      const fromKey = this.stringValue(event.payload?.fromKey);
+      const toKey = this.stringValue(event.payload?.toKey);
+      if (fromNodeId && toNodeId) {
+        const edgeId = `${fromNodeId}->${toNodeId}:data:${toKey}`;
+        out.push(this.wrap<EdgeUpsertPayload>(event.runId, "edge.upsert", event.timestamp, {
+          edgeId,
+          source: fromNodeId,
+          target: toNodeId,
+          fromPort: fromKey || undefined,
+          toPort: toKey || undefined,
+          edgeKind: "data"
+        }));
+      }
+    }
+
+    if (event.type === "engine.node.transition") {
+      const nodeId = this.stringValue(event.payload?.nodeId);
+      const toStatus = this.stringValue(event.payload?.toStatus);
+      const updatedPayload = event.payload?.updatedPayload as Record<string, unknown> | undefined;
+      if (nodeId) {
+        out.push(this.wrap<NodeStatusPayload>(event.runId, "node.status", event.timestamp, {
+          nodeId,
+          status: this.toNodeStatus(toStatus)
+        }));
+        // 若携带快照数据，刷新 Inspector 面板
+        if (updatedPayload && (updatedPayload.inputPorts || updatedPayload.outputPorts || updatedPayload.error || updatedPayload.metrics)) {
+          out.push(this.wrap<NodeIoPayload>(event.runId, "node.io", event.timestamp, {
+            nodeId,
+            inputPorts: updatedPayload.inputPorts as BaseNodePayload["inputPorts"],
+            outputPorts: updatedPayload.outputPorts as BaseNodePayload["outputPorts"],
+            error: updatedPayload.error as BaseNodePayload["error"],
+            metrics: updatedPayload.metrics as BaseNodePayload["metrics"]
+          }));
+        }
+      }
+    }
+
+    if (event.type === "engine.scheduler.issue") {
+      // 调度器死锁/完整性问题 — 记录为系统节点（前端可展示警告）
+      const issueType = this.stringValue(event.payload?.issueType);
+      const message = this.stringValue(event.payload?.message);
+      const issueNodeId = `scheduler-issue-${issueType}-${Date.now()}`;
+      if (message) {
+        out.push(this.wrap<NodeUpsertPayload>(event.runId, "node.upsert", event.timestamp, {
+          nodeId: issueNodeId,
+          kind: "system",
+          title: `调度异常: ${message}`
+        }));
+        out.push(this.wrap<NodeStatusPayload>(event.runId, "node.status", event.timestamp, {
+          nodeId: issueNodeId,
+          status: "fail"
+        }));
+      }
+    }
+
     // ── 新版：weave.dag.base_node — 直接包含完整 BaseNodePayload ────────────
     if (event.type === "plugin.output" && this.stringValue(event.payload?.outputType) === "weave.dag.base_node") {
       const parsed = this.safeJson(this.stringValue(event.payload?.outputText));

@@ -4,6 +4,41 @@
 
 ---
 
+## 2026-03-19 · Entry 008 · 三层解耦 v2 — IEngineEventBus + DagGraph 广播站
+
+### 变更范围
+- `src/runtime/engine-event-bus.ts`（新建 — Layer 1 接口）
+- `src/runtime/dag-graph.ts`（注入广播站 + 4 处 AOP 拦截）
+- `src/runtime/nodes/base-node.ts`（消除 agent/ 层级违规 import）
+- `src/runtime/dag-executor.ts`（消除 agent/ import，内联调度器事件）
+- `src/runtime/nodes/llm-node.ts`（去 import，frozenPayload 传参）
+- `src/runtime/nodes/tool-node.ts`（frozenPayload 传参）
+- `src/agent/run-agent.ts`（IEngineEventBus 适配器 + InputNode 接入）
+- `src/event/event-types.ts`（新增 engine.* 事件类型）
+- `apps/weave-graph-server/src/projection/graph-projector.ts`（处理 engine.* 事件）
+- 删除 `src/agent/weave-emitter.ts`、`src/weave/weave-plugin.ts`
+- 清理 `src/index.ts`、`src/tui/App.tsx`（移除 WeavePlugin 引用）
+
+### 做了什么
+- **新建 `IEngineEventBus` 接口**（Layer 1 纯接口，零外部依赖）：`onNodeCreated/onEdgeCreated/onDataEdgeCreated/onNodeTransition/onSchedulerIssue`
+- **DagGraph 成为广播站**：`addNode/addEdge/addDataEdge/transitionStatus` 四处自动调用 engineEventBus，业务节点零感知
+- **消除层级违规**：`base-node.ts` 删除 `import weave-emitter`，`dag-executor.ts` 删除 `import weave-emitter`，runtime/ 目录实现对 agent/ 的零依赖
+- **frozenPayload 随节点创建广播**：`addNode(node, snapshot)` 同时传入初始快照，状态流转时携带最新快照（Inspector 面板实时更新）
+- **InputNode 进入 DAG**：run-agent.ts 在 llm-1 前添加 input 终态节点，input → llm-1 依赖边由 DAG 自动广播
+- **Layer 3 适配器**：run-agent.ts 内联创建 `IEngineEventBus` 实现，桥接到 WeaveEventBus 的 engine.* 事件
+- **graph-projector 支持 engine.* 事件**：新增 5 个 case 处理 engine 直发事件，生成 node.upsert/node.status/node.io/edge.upsert 图协议事件
+- **删除 585 行冗余代码**：weave-emitter.ts 和 weave-plugin.ts 全部删除
+
+### 为什么这样做
+三处根本问题：（1）base-node.ts 反向 import agent/（Layer 1→Layer 3 污染）；（2）WeavePlugin 维护平行影子节点树（状态撕裂）；（3）可视化事件控制权散落各处（漏发幽灵节点）。正确架构是 DagGraph 作为广播站，AOP 拦截 addNode/transitionStatus 自动发射引擎事件。
+
+### 关键决策
+- **IEngineEventBus 而非 dispatchPluginOutput**：引擎不应知道"插件"概念，`onNodeCreated` 语义纯净；Layer 3 通过依赖反转注入实现
+- **`engine.*` 前缀**：与旧 `weave.*` 前缀区分，语义准确（这是引擎层事件，不是 Weave 插件观察结果）
+- **终态节点 addNode 不影响调度**：`getReadyNodeIds()` 只关注 pending/ready 状态，InputNode(success) 自然不被调度，但 llm-1 依赖它满足后立即就绪
+
+---
+
 ## 2026-03-19 · Entry 007 · Weave 框架三层解耦架构 — Template Method + IoC + Event Sourcing
 
 ### 变更范围

@@ -3,7 +3,6 @@ import { Box, Text, useApp, useInput } from "ink";
 import type { AgentRuntime, AgentRunEvent } from "../agent/run-agent.js";
 import { dispatchUserInput } from "../agent/message-dispatcher.js";
 import type { SessionRecorder } from "../session/session-recorder.js";
-import { WeavePlugin } from "../weave/weave-plugin.js";
 import { AgentUiEventGateway } from "./agent-ui-events.js";
 import { useAgentState } from "./use-agent-state.js";
 import type { WeaveMode } from "./weave-mode.js";
@@ -139,7 +138,7 @@ export function App(props: AppProps): React.ReactElement {
 
       props.recorder.recordUser(nextTurn, rawInput);
 
-      const plugins = parsed.enableWeave ? [new WeavePlugin()] : [];
+      const plugins: import("../agent/plugins/agent-plugin.js").AgentLoopPlugin[] = [];
       try {
         const finalText = await props.agent.runOnceStream(parsed.question, {
           plugins,

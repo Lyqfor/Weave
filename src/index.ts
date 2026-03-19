@@ -9,7 +9,6 @@ import { ToolRegistry } from "./tools/tool-registry.js";
 import { builtinTools } from "./tools/builtins/index.js";
 import React from "react";
 import { App } from "./tui/App.js";
-import { WeavePlugin } from "./weave/weave-plugin.js";
 import type { WeaveMode } from "./tui/weave-mode.js";
 import { createSessionId } from "./utils/id-gen.js";
 
@@ -157,7 +156,7 @@ async function runBatchSession(input: {
     turn += 1;
     input.recorder.recordUser(turn, rawLine);
 
-    const plugins = parsed.enableWeave ? [new WeavePlugin()] : [];
+    const plugins: import("./agent/plugins/agent-plugin.js").AgentLoopPlugin[] = [];
     try {
       const finalText = await input.agent.runOnceStream(parsed.question, {
         plugins,

@@ -1,7 +1,11 @@
 /**
  * 文件作用：提供 DAG 图模型，内置节点状态机约束、数据边与调度校验。
+ * DagExecutionGraph 同时充当广播站：addNode/addEdge/transitionStatus 自动通过
+ * IEngineEventBus 发射引擎事件，业务节点无需关心可视化通知。
  */
-export type DagNodeType = "llm" | "tool" | "final" | "repair" | "escalation";
+import type { IEngineEventBus } from "./engine-event-bus.js";
+
+export type DagNodeType = "llm" | "tool" | "final" | "repair" | "escalation" | "input" | "system";
 export type DagNodeStatus =
   | "pending"
   | "ready"
@@ -51,8 +55,17 @@ export class DagExecutionGraph {
   private readonly outgoing = new Map<string, Set<string>>();
   private readonly incoming = new Map<string, Set<string>>();
   private readonly dataEdgesByTarget = new Map<string, DagDataEdge[]>();
+  private engineEventBus?: IEngineEventBus;
 
-  addNode(node: DagNode): void {
+  setEngineEventBus(bus: IEngineEventBus): void {
+    this.engineEventBus = bus;
+  }
+
+  getEngineEventBus(): IEngineEventBus | undefined {
+    return this.engineEventBus;
+  }
+
+  addNode(node: DagNode, frozenPayload?: Record<string, unknown>): void {
     if (this.nodes.has(node.id)) {
       throw new Error(`节点已存在: ${node.id}`);
     }
@@ -61,9 +74,16 @@ export class DagExecutionGraph {
     this.outgoing.set(node.id, new Set());
     this.incoming.set(node.id, new Set());
     this.dataEdgesByTarget.set(node.id, []);
+
+    // AOP 广播：业务节点只调 addNode，由 DagGraph 统一通知前端
+    this.engineEventBus?.onNodeCreated(
+      node.id,
+      node.type,
+      frozenPayload ?? { id: node.id, type: node.type, status: node.status }
+    );
   }
 
-  addEdge(fromNodeId: string, toNodeId: string): void {
+  addEdge(fromNodeId: string, toNodeId: string, kind?: "dependency" | "data" | "retry"): void {
     if (!this.nodes.has(fromNodeId) || !this.nodes.has(toNodeId)) {
       throw new Error(`边引用了不存在的节点: ${fromNodeId} -> ${toNodeId}`);
     }
@@ -84,6 +104,8 @@ export class DagExecutionGraph {
 
     fromSet.add(toNodeId);
     (this.incoming.get(toNodeId) as Set<string>).add(fromNodeId);
+
+    this.engineEventBus?.onEdgeCreated(fromNodeId, toNodeId, kind ?? "dependency");
   }
 
   addDataEdge(edge: DagDataEdge): void {
@@ -105,6 +127,8 @@ export class DagExecutionGraph {
 
     list.push({ ...edge });
     this.dataEdgesByTarget.set(edge.toNodeId, list);
+
+    this.engineEventBus?.onDataEdgeCreated({ ...edge });
   }
 
   getDataEdgesTo(nodeId: string): DagDataEdge[] {
@@ -115,7 +139,12 @@ export class DagExecutionGraph {
     return [...(this.dataEdgesByTarget.get(nodeId) ?? [])];
   }
 
-  transitionStatus(nodeId: string, toStatus: DagNodeStatus, reason?: string): DagStatusTransition {
+  transitionStatus(
+    nodeId: string,
+    toStatus: DagNodeStatus,
+    reason?: string,
+    frozenPayload?: Record<string, unknown>
+  ): DagStatusTransition {
     const node = this.nodes.get(nodeId);
     if (!node) {
       throw new Error(`节点不存在: ${nodeId}`);
@@ -133,6 +162,8 @@ export class DagExecutionGraph {
 
     node.status = toStatus;
     this.nodes.set(nodeId, node);
+
+    this.engineEventBus?.onNodeTransition(nodeId, node.type, fromStatus, toStatus, reason, frozenPayload);
 
     return { nodeId, fromStatus, toStatus, reason };
   }

@@ -11,9 +11,7 @@ import { BaseNode } from "./base-node.js";
 import { ToolNode } from "./tool-node.js";
 import { FinalNode } from "./final-node.js";
 import type { RunContext } from "../../session/run-context.js";
-import { tryParseJson, safeJsonStringify } from "../../utils/text-utils.js";
-import { emitDagNodeDetail } from "../../agent/weave-emitter.js";
-import type { AgentPluginOutput } from "../../agent/plugins/agent-plugin.js";
+import { tryParseJson } from "../../utils/text-utils.js";
 
 export interface LlmNodeInit {
   step: number;
@@ -132,12 +130,11 @@ export class LlmNode extends BaseNode {
     });
 
     const toolCalls = assistantMessage.tool_calls ?? [];
-    const emitFn = (_runId: string, output: AgentPluginOutput) => ctx.bus.dispatchPluginOutput(output);
 
     if (toolCalls.length === 0) {
       // 无工具调用 → 添加 FinalNode
       const finalNode = new FinalNode(`final-${this.step}`, assistantMessage.content ?? "");
-      ctx.dag.addNode({ id: finalNode.id, type: "final", status: "pending" });
+      ctx.dag.addNode({ id: finalNode.id, type: "final", status: "pending" }, finalNode.freezeSnapshot());
       ctx.dag.addEdge(this.id, finalNode.id);
       ctx.dag.addDataEdge({
         fromNodeId: this.id,
@@ -171,7 +168,7 @@ export class LlmNode extends BaseNode {
         step: this.step
       });
 
-      ctx.dag.addNode({ id: toolNode.id, type: "tool", status: "pending" });
+      ctx.dag.addNode({ id: toolNode.id, type: "tool", status: "pending" }, toolNode.freezeSnapshot());
       ctx.dag.addEdge(this.id, toolNode.id);
       ctx.dag.addDataEdge({
         fromNodeId: this.id,
@@ -181,24 +178,12 @@ export class LlmNode extends BaseNode {
       });
       ctx.nodeRegistry.set(toolNode.id, toolNode);
       toolNodeIds.push(toolNodeId);
-
-      // 发射 intent 详情事件
-      if (assistantMessage.content) {
-        emitDagNodeDetail(ctx.runId, {
-          nodeId: `${this.step}.${i + 1}`,
-          text: `intent=${assistantMessage.content.slice(0, 200)}`
-        }, emitFn);
-      }
-      emitDagNodeDetail(ctx.runId, {
-        nodeId: `${this.step}.${i + 1}`,
-        text: `args=${safeJsonStringify(parsedArgs).slice(0, 200)}`
-      }, emitFn);
     }
 
     if (this.step + 1 <= ctx.maxSteps) {
       // 添加下一个 LLM 节点，等待所有工具完成
       const nextLlmNode = new LlmNode(`llm-${this.step + 1}`, { step: this.step + 1 });
-      ctx.dag.addNode({ id: nextLlmNode.id, type: "llm", status: "pending" });
+      ctx.dag.addNode({ id: nextLlmNode.id, type: "llm", status: "pending" }, nextLlmNode.freezeSnapshot());
       for (let i = 0; i < toolNodeIds.length; i++) {
         ctx.dag.addEdge(toolNodeIds[i], nextLlmNode.id);
         ctx.dag.addDataEdge({
@@ -213,7 +198,7 @@ export class LlmNode extends BaseNode {
       // 达到最大步数 → 添加兜底 FinalNode
       const fallbackFinalId = `final-max-${this.step}`;
       const fallbackFinal = new FinalNode(fallbackFinalId, "已达到最大工具调用步数，请缩小问题范围后重试。");
-      ctx.dag.addNode({ id: fallbackFinalId, type: "final", status: "pending" });
+      ctx.dag.addNode({ id: fallbackFinalId, type: "final", status: "pending" }, fallbackFinal.freezeSnapshot());
       for (const toolNodeId of toolNodeIds) {
         ctx.dag.addEdge(toolNodeId, fallbackFinalId);
         ctx.dag.addDataEdge({

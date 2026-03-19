@@ -6,9 +6,6 @@
 import type { DagExecutionGraph } from "./dag-graph.js";
 import type { RunContext } from "../session/run-context.js";
 import type { BaseNode } from "./nodes/base-node.js";
-import {
-  emitDagSchedulerIssue
-} from "../agent/weave-emitter.js";
 
 export class DagDeadlockError extends Error {
   constructor(public readonly pendingNodeIds: string[]) {
@@ -26,11 +23,11 @@ export async function executeDag(dag: DagExecutionGraph, ctx: RunContext): Promi
 
     if (readyIds.length === 0) {
       const pendingIds = dag.getInProgressNodeIds();
-      emitDagSchedulerIssue(
-        ctx.runId,
-        "dag.scheduler.deadlock",
-        { message: "DAG 调度死锁：存在未完成节点但无可执行 ready 节点", remainingNodeIds: pendingIds },
-        (_runId, output) => ctx.bus.dispatchPluginOutput(output)
+      // 引擎自己广播调度问题，不依赖外层转译
+      dag.getEngineEventBus()?.onSchedulerIssue(
+        "deadlock",
+        "DAG 调度死锁：存在未完成节点但无可执行 ready 节点",
+        pendingIds
       );
       throw new DagDeadlockError(pendingIds);
     }

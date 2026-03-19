@@ -22,8 +22,6 @@ import { safeClone } from "./safe-serialize.js";
 import { globalBlobStore } from "../blob-store.js";
 import type { RunContext } from "../../session/run-context.js";
 import type { DagNodeStatus } from "../dag-graph.js";
-import { emitDagNodeTransition } from "../../agent/weave-emitter.js";
-import type { AgentPluginOutput } from "../../agent/plugins/agent-plugin.js";
 import type { FrozenSnapshot } from "../snapshot-store.js";
 
 export abstract class BaseNode {
@@ -223,21 +221,12 @@ export abstract class BaseNode {
   // ── DAG 状态流转 ──────────────────────────────────────────────────────────
 
   /**
-   * 更新 DAG 调度图中本节点状态，并发射可视化事件。
+   * 更新 DAG 调度图中本节点状态，携带当前快照由 DagGraph 统一广播。
+   * 不再直接依赖 weave-emitter — Layer 1 零 agent/ 污染。
    */
   protected transitionInDag(ctx: RunContext, to: DagNodeStatus, reason?: string): void {
-    const dagNode = ctx.dag.getNode(this.id);
-    const transition = ctx.dag.transitionStatus(this.id, to, reason);
-    const emitFn = (_runId: string, output: AgentPluginOutput) => {
-      ctx.bus.dispatchPluginOutput(output);
-    };
-    emitDagNodeTransition(ctx.runId, {
-      nodeId: this.id,
-      nodeType: dagNode.type,
-      fromStatus: transition.fromStatus,
-      toStatus: transition.toStatus,
-      reason: transition.reason
-    }, emitFn);
+    const currentSnapshot = this.freezeSnapshot();
+    ctx.dag.transitionStatus(this.id, to, reason, currentSnapshot);
   }
 
   // ── 快照能力 ───────────────────────────────────────────────────────────────

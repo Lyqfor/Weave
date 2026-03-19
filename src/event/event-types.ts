@@ -16,7 +16,12 @@ export type AgentRunEventType =
   | "plugin.output"
   | "node.validation_error"
   | "run.completed"
-  | "run.error";
+  | "run.error"
+  | "engine.node.created"
+  | "engine.edge.created"
+  | "engine.data.edge.created"
+  | "engine.node.transition"
+  | "engine.scheduler.issue";
 
 export interface AgentRunEvent {
   type: AgentRunEventType;
@@ -49,5 +54,22 @@ export interface AgentRunEvent {
     outputText?: string;
     nodeId?: string;
     errors?: string[];
+    // engine.* 事件字段
+    nodeType?: string;
+    fromId?: string;
+    toId?: string;
+    kind?: string;
+    fromNodeId?: string;
+    toNodeId?: string;
+    fromKey?: string;
+    toKey?: string;
+    fromStatus?: string;
+    toStatus?: string;
+    reason?: string;
+    updatedPayload?: Record<string, unknown>;
+    issueType?: string;
+    message?: string;
+    nodeIds?: string[];
+    payload?: Record<string, unknown>;
   };
 }

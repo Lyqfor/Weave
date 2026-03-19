@@ -27,7 +27,9 @@ import {
 } from "./plugin-executor.js";
 import { executeDag } from "../runtime/dag-executor.js";
 import { LlmNode } from "../runtime/nodes/llm-node.js";
+import { InputNode } from "../runtime/nodes/input-node.js";
 import type { BaseNode } from "../runtime/nodes/base-node.js";
+import type { IEngineEventBus } from "../runtime/engine-event-bus.js";
 import { WeaveEventBus } from "../event/event-bus.js";
 import type { RunContext, StepGateOptions } from "../session/run-context.js";
 import { PendingPromiseRegistry } from "../weave/pending-promise-registry.js";
@@ -285,6 +287,26 @@ export class AgentRuntime extends EventEmitter {
       pendingRegistry.rejectAll(new Error("DAG 中止"));
     }, { once: true });
 
+    // Layer 3 适配器：将引擎事件桥接到 WeaveEventBus
+    const engineBus: IEngineEventBus = {
+      onNodeCreated(nodeId, nodeType, frozen) {
+        bus.dispatch("engine.node.created", { nodeId, nodeType, payload: frozen });
+      },
+      onEdgeCreated(fromId, toId, kind) {
+        bus.dispatch("engine.edge.created", { fromId, toId, kind });
+      },
+      onDataEdgeCreated(edge) {
+        bus.dispatch("engine.data.edge.created", { ...edge });
+      },
+      onNodeTransition(nodeId, nodeType, fromStatus, toStatus, reason, updatedPayload) {
+        bus.dispatch("engine.node.transition", { nodeId, nodeType, fromStatus, toStatus, reason, updatedPayload });
+      },
+      onSchedulerIssue(type, message, nodeIds) {
+        bus.dispatch("engine.scheduler.issue", { issueType: type, message, nodeIds });
+      }
+    };
+    dag.setEngineEventBus(engineBus);
+
     const ctx: RunContext = {
       runId,
       sessionId: this.sessionId,
@@ -313,9 +335,13 @@ export class AgentRuntime extends EventEmitter {
       snapshotStore
     };
 
-    // 初始化 DAG：添加第一个 LLM 节点
+    // 初始化 DAG：InputNode（终态广播）→ llm-1（调度起点）
+    const inputNode = new InputNode("input", userInput);
+    dag.addNode({ id: "input", type: "input", status: "success" }, inputNode.freezeSnapshot());
+
     const firstLlmNode = new LlmNode("llm-1", { step: 1 });
-    dag.addNode({ id: "llm-1", type: "llm", status: "pending" });
+    dag.addNode({ id: "llm-1", type: "llm", status: "pending" }, firstLlmNode.freezeSnapshot());
+    dag.addEdge("input", "llm-1");
     nodeRegistry.set("llm-1", firstLlmNode);
     dag.validateIntegrity();
 
@@ -323,6 +349,25 @@ export class AgentRuntime extends EventEmitter {
 
     try {
       return await executeDag(dag, ctx);
+    } catch (error) {
+      // DagDeadlockError 的 onSchedulerIssue 已在 dag-executor 广播，此处只加可视化 error 节点
+      const errorMessage = extractErrorMessage(error);
+      const errorNodeId = "error";
+      try {
+        dag.addNode(
+          { id: errorNodeId, type: "system", status: "fail" },
+          {
+            nodeId: errorNodeId,
+            kind: "system",
+            title: `运行失败: ${errorMessage}`,
+            status: "fail",
+            error: { name: "RunError", message: errorMessage }
+          }
+        );
+      } catch {
+        // 忽略 error node 添加失败（例如节点 ID 已存在）
+      }
+      throw error;
     } finally {
       // 会话结束，快照完整落盘
       await snapshotStore.flush().catch(() => {});
