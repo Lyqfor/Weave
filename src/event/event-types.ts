@@ -22,7 +22,8 @@ export type AgentRunEventType =
   | "engine.data.edge.created"
   | "engine.node.transition"
   | "engine.node.io"
-  | "engine.scheduler.issue";
+  | "engine.scheduler.issue"
+  | "engine.node.stream.delta";
 
 export interface AgentRunEvent {
   type: AgentRunEventType;
@@ -77,5 +78,7 @@ export interface AgentRunEvent {
     outputPorts?: unknown[];
     error?: unknown;
     metrics?: unknown;
+    // engine.node.stream.delta 字段
+    chunkText?: string;
   };
 }

@@ -4,6 +4,65 @@
 
 ---
 
+## 2026-03-19 · Entry 012 · 调度引擎重构：EngineContext/BaseNode 泛型化 + TurnEngineBusAdapter + 流式旁路
+
+### 变更范围
+- `src/engine/engine-types.ts`（新建 EngineContext 接口）
+- `src/agent/turn-engine-bus-adapter.ts`（新建 TurnEngineBusAdapter 类）
+- `src/engine/engine-event-bus.ts`（新增 `onNodeStreamDelta?`）
+- `src/engine/dag-executor.ts`（收窄参数类型到 EngineContext，删除 pendingRegistry 调用，新增 WeaveDAGEngine 类）
+- `src/session/run-context.ts`（`RunContext extends EngineContext`，移除重复字段）
+- `src/nodes/base-node.ts`（`BaseNode<C extends EngineContext = any>` 泛型化）
+- `src/nodes/llm-node.ts`（`BaseNode<RunContext>`，激活流式旁路 onNodeStreamDelta）
+- `src/nodes/tool-node.ts` / `final-node.ts`（`BaseNode<RunContext>`）
+- `src/nodes/input-node.ts` / `repair-node.ts` / `attempt-node.ts` / `escalation-node.ts`（`BaseNode<EngineContext>`）
+- `src/llm/qwen-client.ts`（`chatWithTools` 新增流式路径 + 工具调用聚合）
+- `src/event/event-types.ts`（新增 `engine.node.stream.delta` 事件类型）
+- `scripts/verify-dag-matrix.mjs`（修复路径 runtime → engine，删除已废弃的 WeavePlugin 引用）
+
+### 做了什么
+- **新建 `EngineContext` 接口**：提炼调度引擎最小依赖集（`runId/dag/abortSignal/abortController/nodeRegistry/stateStore/snapshotStore/logger`），`RunContext extends EngineContext` 后仅叠加智能体层字段
+- **`BaseNode<C extends EngineContext = any>` 泛型化**：模板方法 `execute(ctx: C)` / `doExecute(ctx: C)` / `transitionInDag(ctx: C)` 全泛型，拦截器/bus 通过 `(ctx as any)` 安全访问（仅 RunContext 场景持有）
+- **抽取 TurnEngineBusAdapter**：将 `run-agent.ts` 中 30 行内联匿名 `IEngineEventBus` 提升为具名类，含 `onNodeStreamDelta` 实现
+- **流式旁路 onNodeStreamDelta**：`qwen-client.ts` 新增流式 `chatWithTools` 路径（工具调用聚合），`llm-node.ts` 在 `onDelta` 回调中广播 delta 至引擎事件总线
+- **引擎层与 Step Gate 解耦**：`dag-executor.ts` 删除 `ctx.pendingRegistry?.rejectAll(...)` 调用，改由 `run-agent.ts` Layer 3 通过 `abortController.signal` 监听自动清理
+- **新增 `WeaveDAGEngine` 类**：面向对象封装 executeDag，便于依赖注入与单元测试
+
+### 为什么这样做
+计划要求完成四项真正缺失的实现：EngineContext 最小接口提取、BaseNode 泛型化、TurnEngineBusAdapter 具名化、流式旁路。核心动机是三层解耦：Layer 1（引擎）不依赖 Layer 3（Step Gate 人机交互），引擎事件总线以适配器模式桥接，不污染核心数据流。
+
+### 关键决策
+- `EngineContext.nodeRegistry: Map<string, any>` 避免与 `base-node.ts` 的循环导入，`dag-executor` 内部已有类型断言
+- `(ctx as any).interceptor` 和 `(ctx as any).bus`：拦截器/bus 仅在 RunContext 场景存在，模板方法通过 any 安全访问，语义上比引入循环依赖更清晰
+- `pendingRegistry` 不放入 EngineContext：Step Gate 挂起字典属于人机交互层，引擎层通过 abort signal 信号间接触发清理
+
+---
+
+## 2026-03-19 · Entry 011 · WebSocket 协议升维：双轨制 RPC + 前端全链路适配
+
+### 变更范围
+- `apps/shared/graph-protocol.ts`（定义 `ClientMessageEnvelope` / `ServerResponseMessageEnvelope`）
+- `docs/api/graph-protocol.md`（更新 RPC 交互文档）
+- `apps/weave-graph-server/src/gateway/ws-gateway.ts`（网关重构，支持消息分发、RPC 响应、二次校验钩子）
+- `apps/weave-graph-web/src/store/graph-store.ts`（新增 `sendRpc` / `resolveRpc` 状态管理）
+- `apps/weave-graph-web/src/App.tsx`（WebSocket 轨道分离处理，事件监听）
+- `apps/weave-graph-web/src/components/ApprovalPanel.tsx`（重构为异步 RPC 调用，支持报错回显）
+
+### 做了什么
+- **协议升维**：将原有的单向 WebSocket 扩展为“双轨制”模型：
+  - **轨道 1 (Server Push)**：负责客观图状态广播（`node.upsert`, `node.status` 等）。
+  - **轨道 2 (RPC)**：负责主观交互请求与响应（请求-响应模式，基于 `reqId`）。
+- **后端网关解耦**：`ws-gateway.ts` 引入 `MessageDispatcher`。当收到 `gate.action` 指令时，先触发 `validationHandler` 进行二次校验。若校验失败，直接通过 RPC 轨道回传 `ok: false` 与错误详情，不干扰引擎执行。
+- **前端 Promise 化 RPC**：`graph-store.ts` 引入 `pendingRequests` 注册表。前端调用 `await sendRpc()` 会挂起一个 Promise，直到收到后端携带相同 `reqId` 的响应。
+- **UI 闭环反馈**：`ApprovalPanel` 升级为异步模式。当用户编辑参数导致后端校验失败时，错误信息会即时反馈在前端输入框下方，且保持审批面板开启，解决了“点一下没反应”或“报错后面板直接关闭”的痛点。
+
+### 为什么这样做
+为了实现“顶级工业级架构”，必须消除前后端在交互逻辑上的模糊性。旧架构中，前端发送指令后只能被动等待广播流，无法得知具体操作是否因校验失败而被拦截。新架构通过 RPC 轨道提供了确定的反馈机制，同时为未来的“快照回溯（Backtracking）”和“分叉执行（Forking）”等复杂指令预留了标准的消息信封。
+
+### 关键决策
+- **绝对零侵入**：底层 `src/runtime` 核心逻辑未改动一行代码。所有 RPC 逻辑在网关适配层（Gateway Layer）消化，符合 Adapter 模式。
+- **自定义事件解耦**：Store 与 App.tsx 之间通过 `weave:rpc:send` 自定义事件通信，避免了在 Zustand Store 中直接持有 WebSocket 实例，保持了 React 组件生命周期与原生 WS 对象的清晰边界。
+
 ## 2026-03-19 · Entry 010 · 修复 InputNode/RepairNode/RetryToolNode 端口数据未广播
 
 ### 变更范围

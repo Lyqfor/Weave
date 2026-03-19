@@ -1,11 +1,10 @@
 /**
  * 文件作用：DAG 语义测试矩阵，覆盖环路/死锁/依赖缺失/重试/超时/审批恢复/off-on-step 一致性。
  */
-import { DagExecutionGraph } from "../dist/runtime/dag-graph.js";
+import { DagExecutionGraph } from "../dist/engine/dag-graph.js";
 import { AgentRuntime } from "../dist/agent/run-agent.js";
 import { MemoryStore } from "../dist/memory/memory-store.js";
 import { ToolRegistry } from "../dist/tools/tool-registry.js";
-import { WeavePlugin } from "../dist/weave/weave-plugin.js";
 
 async function main() {
   const baseConfig = {
@@ -110,19 +109,14 @@ async function verifyRetryRecovery(config) {
   });
 
   const finalText = await runtime.runOnceStream("retry test", {
-    plugins: [new WeavePlugin()],
     autoMode: true
   });
 
   assert(finalText === "retry-ok", "retry path should still finish with final response");
   assert(executeCount === 2, "retry path should execute tool twice");
   assert(
-    events.some((event) => event.type === "plugin.output" && (
-      event.payload?.outputType === "weave.dag.node" ||
-      event.payload?.outputType === "weave.dag.edge" ||
-      event.payload?.outputType === "weave.dag.event"
-    )),
-    "retry path should emit weave dag events"
+    events.some((event) => event.type === "engine.node.created" || event.type === "engine.node.transition"),
+    "retry path should emit engine node events"
   );
 }
 
@@ -163,9 +157,7 @@ async function verifyTimeoutPath(config) {
     }
   });
 
-  const finalText = await runtime.runOnceStream("timeout test", {
-    plugins: [new WeavePlugin()]
-  });
+  const finalText = await runtime.runOnceStream("timeout test");
 
   assert(finalText === "timeout-finished", "timeout path should keep loop alive and finish");
   assert(
@@ -214,7 +206,6 @@ async function verifyApprovalInterruptRecovery(config) {
   });
 
   const finalText = await runtime.runOnceStream("approval test", {
-    plugins: [new WeavePlugin()],
     stepMode: true,
     approveToolCall: async () => {
       await sleep(20);
@@ -253,11 +244,8 @@ async function verifyOffOnStepConsistency(config) {
   const step = createRuntime(config, async () => ({ content: "CONSISTENT", tool_calls: [] }));
 
   const offText = await off.runtime.runOnceStream("consistency off");
-  const onText = await on.runtime.runOnceStream("consistency on", {
-    plugins: [new WeavePlugin()]
-  });
+  const onText = await on.runtime.runOnceStream("consistency on");
   const stepText = await step.runtime.runOnceStream("consistency step", {
-    plugins: [new WeavePlugin()],
     stepMode: true,
     approveToolCall: async () => ({ action: "approve" })
   });

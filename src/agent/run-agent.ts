@@ -4,11 +4,11 @@ import { QwenClient } from "../llm/qwen-client.js";
 import { MemoryStore } from "../memory/memory-store.js";
 import { AppLogger } from "../logging/app-logger.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
-import { DagExecutionGraph } from "../runtime/dag-graph.js";
-import { DagStateStore } from "../runtime/state-store.js";
+import { DagExecutionGraph } from "../engine/dag-graph.js";
+import { DagStateStore } from "../engine/state-store.js";
 import type {
   RunOnceStreamOptions
-} from "../runtime/runner-types.js";
+} from "../engine/runner-types.js";
 import type OpenAI from "openai";
 import type {
   AgentLoopPlugin,
@@ -25,16 +25,16 @@ import {
   executeOnRunCompleted,
   executeOnRunError
 } from "./plugin-executor.js";
-import { executeDag } from "../runtime/dag-executor.js";
-import { LlmNode } from "../runtime/nodes/llm-node.js";
-import { InputNode } from "../runtime/nodes/input-node.js";
-import type { BaseNode } from "../runtime/nodes/base-node.js";
-import type { IEngineEventBus } from "../runtime/engine-event-bus.js";
+import { executeDag } from "../engine/dag-executor.js";
+import { LlmNode } from "../nodes/llm-node.js";
+import { InputNode } from "../nodes/input-node.js";
+import type { BaseNode } from "../nodes/base-node.js";
 import { WeaveEventBus } from "../event/event-bus.js";
+import { TurnEngineBusAdapter } from "./turn-engine-bus-adapter.js";
 import type { RunContext, StepGateOptions } from "../session/run-context.js";
 import { PendingPromiseRegistry } from "../weave/pending-promise-registry.js";
 import { StepGateInterceptor } from "../weave/step-gate-interceptor.js";
-import { SnapshotStore } from "../runtime/snapshot-store.js";
+import { SnapshotStore } from "../engine/snapshot-store.js";
 import * as path from "node:path";
 
 // 从 event-types 重新导出，保持向后兼容
@@ -288,27 +288,8 @@ export class AgentRuntime extends EventEmitter {
     }, { once: true });
 
     // Layer 3 适配器：将引擎事件桥接到 WeaveEventBus
-    const engineBus: IEngineEventBus = {
-      onNodeCreated(nodeId, nodeType, frozen) {
-        bus.dispatch("engine.node.created", { nodeId, nodeType, payload: frozen });
-      },
-      onEdgeCreated(fromId, toId, kind) {
-        bus.dispatch("engine.edge.created", { fromId, toId, kind });
-      },
-      onDataEdgeCreated(edge) {
-        bus.dispatch("engine.data.edge.created", { ...edge });
-      },
-      onNodeTransition(nodeId, nodeType, fromStatus, toStatus, reason, updatedPayload) {
-        bus.dispatch("engine.node.transition", { nodeId, nodeType, fromStatus, toStatus, reason, updatedPayload });
-      },
-      onNodeIo(nodeId, inputPorts, outputPorts, error, metrics) {
-        bus.dispatch("engine.node.io", { nodeId, inputPorts, outputPorts, error, metrics });
-      },
-      onSchedulerIssue(type, message, nodeIds) {
-        bus.dispatch("engine.scheduler.issue", { issueType: type, message, nodeIds });
-      }
-    };
-    dag.setEngineEventBus(engineBus);
+    const turnAdapter = new TurnEngineBusAdapter(bus, runId, this.sessionId);
+    dag.setEngineEventBus(turnAdapter);
 
     const ctx: RunContext = {
       runId,

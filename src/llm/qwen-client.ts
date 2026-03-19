@@ -100,38 +100,95 @@ export class QwenClient {
     return fullText;
   }
 
-  async chatWithTools(input: ChatLoopInput): Promise<OpenAI.Chat.Completions.ChatCompletionMessage> {
-    // Agent loop 使用非流式请求，优先确保 tool call 结构稳定可解析。
+  async chatWithTools(
+    input: ChatLoopInput,
+    options?: { onDelta?: (delta: string) => void }
+  ): Promise<OpenAI.Chat.Completions.ChatCompletionMessage> {
     this.logger.info("chat.tools.request", "发起可工具调用请求", {
       messageCount: input.messages.length,
-      toolCount: input.tools.length
+      toolCount: input.tools.length,
+      streaming: Boolean(options?.onDelta)
     });
 
-    const completion = await this.client.chat.completions.create({
+    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+      { role: "system", content: input.systemPrompt },
+      ...input.messages
+    ];
+
+    if (!options?.onDelta) {
+      // 非流式路径（默认）：结构稳定，工具调用解析可靠
+      const completion = await this.client.chat.completions.create({
+        model: this.config.model,
+        temperature: this.config.temperature,
+        max_tokens: this.config.maxTokens,
+        tool_choice: "auto",
+        tools: input.tools,
+        messages
+      });
+
+      const message = completion.choices[0]?.message;
+      if (!message) {
+        throw new Error("模型未返回可用消息。\n");
+      }
+
+      this.logger.info("chat.tools.response", "工具调用响应已返回", {
+        hasToolCalls: Boolean(message.tool_calls?.length),
+        hasContent: Boolean(message.content)
+      });
+      return message;
+    }
+
+    // 流式路径：逐 delta 广播，同时聚合完整消息
+    const stream = await this.client.chat.completions.create({
       model: this.config.model,
       temperature: this.config.temperature,
       max_tokens: this.config.maxTokens,
       tool_choice: "auto",
       tools: input.tools,
-      messages: [
-        {
-          role: "system",
-          content: input.systemPrompt
-        },
-        ...input.messages
-      ]
+      messages,
+      stream: true
     });
 
-    const message = completion.choices[0]?.message;
-    if (!message) {
-      throw new Error("模型未返回可用消息。\n");
+    let fullContent = "";
+    const toolCallBuilders = new Map<number, { id: string; name: string; arguments: string }>();
+
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta;
+      if (delta?.content) {
+        fullContent += delta.content;
+        options.onDelta(delta.content);
+      }
+      for (const tc of delta?.tool_calls ?? []) {
+        const prev = toolCallBuilders.get(tc.index) ?? { id: "", name: "", arguments: "" };
+        if (tc.id) prev.id = tc.id;
+        if (tc.function?.name) prev.name += tc.function.name;
+        if (tc.function?.arguments) prev.arguments += tc.function.arguments;
+        toolCallBuilders.set(tc.index, prev);
+      }
     }
 
-    this.logger.info("chat.tools.response", "工具调用响应已返回", {
-      hasToolCalls: Boolean(message.tool_calls?.length),
-      hasContent: Boolean(message.content)
+    const tool_calls: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[] | undefined =
+      toolCallBuilders.size > 0
+        ? [...toolCallBuilders.entries()]
+            .sort(([a], [b]) => a - b)
+            .map(([, tc]) => ({
+              id: tc.id,
+              type: "function" as const,
+              function: { name: tc.name, arguments: tc.arguments }
+            }))
+        : undefined;
+
+    this.logger.info("chat.tools.response", "工具调用流式响应已完成", {
+      hasToolCalls: Boolean(tool_calls?.length),
+      hasContent: Boolean(fullContent)
     });
-    return message;
+
+    return {
+      role: "assistant",
+      content: fullContent || null,
+      refusal: null,
+      tool_calls
+    };
   }
 
   private buildMessages(input: ChatTurnInput): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
