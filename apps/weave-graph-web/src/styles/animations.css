@@ -73,3 +73,13 @@
     50% { transform: translateY(-3px); }
   }
 }
+
+/* ====== 🚀 Phase 1: 量子织锦光纤流动动画 ====== */
+@keyframes quantum-flow {
+  0% {
+    background-position: 0% 0%;
+  }
+  100% {
+    background-position: 100% 100%;
+  }
+}

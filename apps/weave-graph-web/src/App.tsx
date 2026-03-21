@@ -155,7 +155,7 @@ function PortSection({
   );
 }
 
-function GraphCanvas() {
+function GraphCanvas({ isWeavingStarted }: { isWeavingStarted: boolean }) {
   const dags = useGraphStore((s) => s.dags);
   const dagOrder = useGraphStore((s) => s.dagOrder);
   const activeDagId = useGraphStore((s) => s.activeDagId);
@@ -175,6 +175,9 @@ function GraphCanvas() {
 
   // 1. 核心状态：本地节点与视角控制状态
   const [localNodes, setLocalNodes] = useState<Node<GraphNodeData>[]>([]);
+  const localNodesRef = useRef<Node<GraphNodeData>[]>([]);
+  localNodesRef.current = localNodes;
+
   const isDraggingRef = useRef(false);
   const userInteractedRef = useRef(false);
   const sessionManager = useRef<Record<string, { autoCentered: boolean; userInteracted: boolean }>>({});
@@ -182,20 +185,28 @@ function GraphCanvas() {
   // 用于追踪由于尺寸变化需要重新布局的标志
   const [layoutTriggerStamp, setLayoutTriggerStamp] = useState(0);
   const dimensionsCacheRef = useRef<Record<string, { w: number, h: number }>>({});
+  const prevDagIdRef = useRef(activeDagId);
 
   // 2. 响应式同步：全局 nodes 变化时立即更新 localNodes，确保状态秒出，同时隐藏未布局的新节点
   useEffect(() => {
     if (isDraggingRef.current) return;
 
     setLocalNodes(nds => {
+      const isSwitching = prevDagIdRef.current !== activeDagId;
+      if (isSwitching) {
+        prevDagIdRef.current = activeDagId;
+      }
+
       return nodes.map(n => {
-        const existing = nds.find(ln => ln.id === n.id);
+        // 关键修复：跨会话时不复用 existing，避免出现将上一个会话的节点移动到新会话的问题，解决节点丢失 Bug。
+        const existing = isSwitching ? undefined : nds.find(ln => ln.id === n.id);
         const isNewNode = !existing;
         
         return {
           ...n,
           type: 'semantic',
-          // 关键修复：如果本地已有，保留其位置和可见性；新节点初始隐藏并等待布局，防止在 (0,0) 闪烁
+          // 关键修复：显式同步 store 里的选中状态到 React Flow 节点属性上
+          selected: n.id === selectedNodeId,
           position: existing?.position ?? n.position,
           hidden: isNewNode ? true : existing?.hidden,
           width: existing?.width,
@@ -203,7 +214,7 @@ function GraphCanvas() {
         };
       });
     });
-  }, [nodes]);
+  }, [nodes, activeDagId, selectedNodeId]); // 增加 selectedNodeId 依赖确保选中态实时同步
 
   // 3. 布局就绪逻辑：更新坐标，解除隐藏
   const handleLayoutReady = useCallback((layouted: Node[]) => {
@@ -218,11 +229,12 @@ function GraphCanvas() {
         sessionManager.current[activeDagId] = { autoCentered: false, userInteracted: false };
       }
       const state = sessionManager.current[activeDagId];
+      // 关键修复：逻辑中 autoCentered 依然作为开关，但在 session switch 时我们会重置 state
       if (!state.userInteracted && !state.autoCentered) {
         window.setTimeout(() => {
           fitView({ padding: 0.3, duration: 800, maxZoom: 0.85 });
           state.autoCentered = true;
-        }, 100);
+        }, 150); // 略微增加延迟确保节点已经 render 完毕
       }
     }
   }, [activeDagId, fitView]);
@@ -236,8 +248,9 @@ function GraphCanvas() {
         if (!sessionManager.current[activeDagId]) {
           sessionManager.current[activeDagId] = { autoCentered: false, userInteracted: false };
         } else {
-          // 关键：切换回旧会话时，重置对焦标识，允许再次触发 fitView
+          // 关键修复：切换回旧会话时，同时重置对焦标识和用户交互标识，允许再次触发 fitView
           sessionManager.current[activeDagId].autoCentered = false;
+          sessionManager.current[activeDagId].userInteracted = false;
         }
       }
     }
@@ -302,14 +315,18 @@ function GraphCanvas() {
 
   // 6. Dagre 布局：增加全量依赖及尺寸触发器
   useEffect(() => {
-    if (isDraggingRef.current || !activeDagId || localNodes.length === 0) return;
+    if (isDraggingRef.current || !activeDagId || nodes.length === 0) return;
 
-    // 传给布局引擎时，携带本地捕获到的真实 width/height
-    const layoutInputNodes = localNodes.map(n => ({
-      ...n,
-      width: n.width ?? 240,
-      height: n.height ?? 72
-    }));
+    // 关键修复：使用最新的 activeDag.nodes 作为布局输入，避免闭包陷阱中使用了旧的 localNodes
+    const layoutInputNodes = nodes.map(n => {
+      const ln = localNodesRef.current.find(l => l.id === n.id);
+      const cached = dimensionsCacheRef.current[n.id];
+      return {
+        ...n,
+        width: ln?.width ?? cached?.w ?? 240,
+        height: ln?.height ?? cached?.h ?? 72
+      };
+    });
 
     layoutCancelRef.current = false;
     const timer = window.setTimeout(() => {
@@ -447,26 +464,30 @@ function GraphCanvas() {
     >
       <CosmicBackground />
 
-      <Header
-        dagOrder={dagOrder}
-        activeDagId={activeDagId}
-        activeDagNodes={activeDag?.nodes ?? []}
-        wsStatus={wsStatus}
-        fitView={fitView}
-      />
+      {isWeavingStarted && (
+        <Header
+          dagOrder={dagOrder}
+          activeDagId={activeDagId}
+          activeDagNodes={activeDag?.nodes ?? []}
+          wsStatus={wsStatus}
+          fitView={fitView}
+        />
+      )}
 
       <div style={{ display: "flex", flex: 1, overflow: "hidden", background: "transparent" }}>
-        <LeftPanel
-          dagOrder={dagOrder}
-          dags={dags}
-          activeDagId={activeDagId}
-          setActiveDag={setActiveDag}
-          isCollapsed={leftCollapsed}
-          setCollapsed={setLeftCollapsed}
-        />
+        {isWeavingStarted && (
+          <LeftPanel
+            dagOrder={dagOrder}
+            dags={dags}
+            activeDagId={activeDagId}
+            setActiveDag={setActiveDag}
+            isCollapsed={leftCollapsed}
+            setCollapsed={setLeftCollapsed}
+          />
+        )}
 
         <main className="canvas-panel" style={{ flex: 1, position: "relative", overflow: "hidden", background: "transparent" }}>
-          {isCanvasEmpty && (
+          {isWeavingStarted && isCanvasEmpty && (
             <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none", zIndex: 1, gap: 0 }}>
               <div style={{ fontSize: 188, opacity: 0.8, userSelect: "none", lineHeight: 1 }}>🌌</div>
               <div className="weave-galaxy-text" style={{ fontFamily: "var(--font-mono)", fontSize: 64, fontWeight: 800, letterSpacing: "0.25em", marginTop: 16, userSelect: "none" }}>WEAVE</div>
@@ -476,39 +497,43 @@ function GraphCanvas() {
             </div>
           )}
 
-          <ReactFlow
-            nodes={localNodes}
-            edges={styledEdges}
-            fitView
-            nodeTypes={nodeTypes}
-            edgeTypes={edgeTypes}
-            onNodesChange={onNodesChange}
-            onNodeDragStart={handleDragStart}
-            onNodeDragStop={handleDragStop}
-            onNodeClick={(_, node) => {
-              selectNode(node.id);
-            }}
-            onPaneClick={onPaneClick}
-            defaultEdgeOptions={{ type: "flow" }}
-            style={{ background: 'transparent' }}
-            className="css-grid-bg"
-            onlyRenderVisibleElements={true}
-          >
-            {!isCanvasEmpty && (
-              <>
-                <MiniMap 
-                  style={{ background: "var(--bg-surface)", opacity: tier === 'low' ? 0.8 : 1 }} 
-                  maskColor="rgba(8, 11, 20, 0.75)" 
-                />
-                <Controls />
-              </>
-            )}
-          </ReactFlow>
+          {isWeavingStarted && (
+            <ReactFlow
+              nodes={localNodes}
+              edges={styledEdges}
+              fitView
+              nodeTypes={nodeTypes}
+              edgeTypes={edgeTypes}
+              onNodesChange={onNodesChange}
+              onNodeDragStart={handleDragStart}
+              onNodeDragStop={handleDragStop}
+              onNodeClick={(_, node) => {
+                selectNode(node.id);
+              }}
+              onPaneClick={onPaneClick}
+              defaultEdgeOptions={{ type: "flow" }}
+              style={{ background: 'transparent' }}
+              className="css-grid-bg"
+              onlyRenderVisibleElements={true}
+            >
+              {!isCanvasEmpty && (
+                <>
+                  <MiniMap 
+                    style={{ background: "var(--bg-surface)", opacity: tier === 'low' ? 0.8 : 1 }} 
+                    maskColor="rgba(8, 11, 20, 0.75)" 
+                  />
+                  <Controls />
+                </>
+              )}
+            </ReactFlow>
+          )}
         </main>
 
-        <RightPanel isCollapsed={rightCollapsed} setCollapsed={setRightCollapsed}>
-          {inspectorContent}
-        </RightPanel>
+        {isWeavingStarted && (
+          <RightPanel isCollapsed={rightCollapsed} setCollapsed={setRightCollapsed}>
+            {inspectorContent}
+          </RightPanel>
+        )}
       </div>
     </div>
   );
@@ -593,9 +618,11 @@ function getStatusBadgeStyle(status?: string) {
 }
 
 export default function App() {
+  const [isWeavingStarted, setIsWeavingStarted] = useState(false);
+
   return (
     <ReactFlowProvider>
-      <GraphCanvas />
+      <GraphCanvas isWeavingStarted={isWeavingStarted} />
     </ReactFlowProvider>
   );
 }

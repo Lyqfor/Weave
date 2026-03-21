@@ -28,10 +28,10 @@ export const Header: React.FC<{
         gridTemplateColumns: "1fr auto 1fr",
         alignItems: "center",
         padding: "0 18px",
-        background: "var(--glass-bg)",
-        backdropFilter: "blur(var(--glass-blur)) saturate(1.3)",
-        WebkitBackdropFilter: "blur(var(--glass-blur)) saturate(1.3)",
-        borderBottom: "1px solid var(--border-dim)",
+        background: "rgba(15, 15, 20, 0.4)",
+        backdropFilter: "blur(12px)",
+        WebkitBackdropFilter: "blur(12px)",
+        borderBottom: "1px solid rgba(255,255,255,0.05)",
         zIndex: 10,
       }}
     >

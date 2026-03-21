@@ -6,7 +6,6 @@ export const CosmicBackground: React.FC = () => {
   const tier = usePerformance();
   const isLow = tier === 'low';
 
-  // CPU 模式下减小模糊半径，显著提升渲染速度
   const blurRadius = isLow ? '40px' : '80px';
   const nebulaOpacity = isLow ? 0.06 : 0.1;
 
@@ -20,12 +19,30 @@ export const CosmicBackground: React.FC = () => {
         transition: 'opacity 0.4s ease',
         transform: 'translateZ(0)',
         backfaceVisibility: 'hidden',
-        zIndex: 0, // 改为 0，确保在所有透明容器之下，但在渲染层之上
-        background: '#09090b', // 显式设置曜石黑底色
+        zIndex: 0,
+        background: '#09090b',
       }}
       className="cosmic-bg"
     >
-      {/* 恢复三团星云 */}
+      {/* 🚀 Phase 1: 量子织锦层 (光纤流动与噪点，纯CSS硬件加速) */}
+      <div
+        className="quantum-tapestry"
+        style={{
+          position: 'absolute',
+          inset: 0,
+          opacity: 0.65,
+          background: `
+            linear-gradient(60deg, rgba(15, 20, 40, 0.5) 0%, rgba(45, 20, 70, 0.4) 50%, rgba(10, 20, 45, 0.5) 100%),
+            url('data:image/svg+xml;utf8,%3Csvg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg"%3E%3Cfilter id="noise"%3E%3CfeTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="3" stitchTiles="stitch"/%3E%3C/filter%3E%3Crect width="100%25" height="100%25" filter="url(%23noise)" opacity="0.15"/%3E%3C/svg%3E')
+          `,
+          backgroundSize: '200% 200%, 150px 150px',
+          backgroundBlendMode: 'overlay',
+          animation: 'quantum-flow 30s linear infinite',
+          zIndex: 1,
+        }}
+      />
+
+      {/* 恢复三团星云 (z-index: 2 覆盖在织锦上方) */}
       <div
         style={{
           position: 'absolute',
@@ -36,6 +53,7 @@ export const CosmicBackground: React.FC = () => {
           filter: `blur(${blurRadius})`,
           animation: 'nebula-drift 25s ease-in-out infinite',
           willChange: 'transform',
+          zIndex: 2,
         }}
       />
       <div
@@ -49,6 +67,7 @@ export const CosmicBackground: React.FC = () => {
           animation: 'nebula-drift 25s ease-in-out infinite',
           animationDelay: '-10s',
           willChange: 'transform',
+          zIndex: 2,
         }}
       />
       <div
@@ -62,6 +81,7 @@ export const CosmicBackground: React.FC = () => {
           animation: 'nebula-drift 25s ease-in-out infinite',
           animationDelay: '-18s',
           willChange: 'transform',
+          zIndex: 2,
         }}
       />
       
@@ -76,9 +96,14 @@ export const CosmicBackground: React.FC = () => {
           `,
           backgroundSize: '32px 32px',
           opacity: isLow ? 0.5 : 1,
+          zIndex: 2,
         }}
       />
-      <StarCanvas tier={tier} />
+      
+      {/* 动态星空 (z-index: 3) */}
+      <div style={{ position: 'absolute', inset: 0, zIndex: 3 }}>
+        <StarCanvas tier={tier} />
+      </div>
     </div>
   );
 };
