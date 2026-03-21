@@ -174,19 +174,27 @@
     width: 36px;
     height: 36px;
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    color: var(--text-primary);
+    background: transparent; /* 平时完全透明 */
+    border: 1px solid rgba(255, 255, 255, 0.03);
+    color: rgba(139, 92, 246, 0.2); /* 符号极其暗淡 */
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: transform 0.2s var(--ease-spring), background 0.2s, color 0.2s;
+    transition: all 0.4s var(--ease-out-quart);
+  }
+
+  .magic-input-wrapper:focus-within .magic-send-btn {
+    background: rgba(139, 92, 246, 0.12); /* 聚焦后唤醒 */
+    border-color: rgba(139, 92, 246, 0.3);
+    color: #8B5CF6;
+    box-shadow: 0 0 15px rgba(139, 92, 246, 0.2);
   }
 
   .magic-send-btn:hover:not(:disabled) {
     transform: scale(1.05);
-    background: rgba(255, 255, 255, 0.15);
+    background: rgba(139, 92, 246, 0.2);
+    color: #A78BFA;
   }
 
   .magic-send-btn:active:not(:disabled) {

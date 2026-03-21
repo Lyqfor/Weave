@@ -124,45 +124,36 @@
   .constellation-draw-mask {
     stroke-dasharray: 100;
     stroke-dashoffset: 100;
-    transition: stroke-dashoffset 1.8s cubic-bezier(0.25, 1, 0.5, 1);
+    /* 改为 linear 确保点亮节奏可预测且精准 */
+    transition: stroke-dashoffset 1.5s linear;
   }
 
   body.input-focused .constellation-draw-mask {
     stroke-dashoffset: 0;
   }
 
-  .constellation-active-line {
-    animation: constellation-flow 3s linear infinite;
-  }
-
-  @keyframes constellation-flow {
-    to { stroke-dashoffset: -40; }
-  }
-
   .constellation-star-node {
     opacity: 0;
-    transform: scale(0.5);
-    transform-box: fill-box;
-    transform-origin: center;
-    transition: opacity 0.6s cubic-bezier(0.25, 1, 0.5, 1), transform 0.6s cubic-bezier(0.25, 1, 0.5, 1);
-    transition-delay: calc(var(--star-index, 0) * 0.18s);
+    transition: opacity 0.3s ease-out;
+    /* 1.5s / 6 段主要线段 ≈ 0.25s 步长 */
+    /* 第一颗星 (index 0) 延迟为 0，立即亮起 */
+    transition-delay: calc(var(--star-index, 0) * 0.25s);
   }
 
   body.input-focused .constellation-star-node {
     opacity: 1;
-    transform: scale(1);
   }
 
   .constellation-star {
+    /* 仅通过透明度实现呼吸感，彻底杜绝位置浮动 */
     animation: star-twinkle 4s ease-in-out infinite;
     animation-delay: calc(var(--star-index, 0) * 0.5s);
   }
 
   @keyframes star-twinkle {
-    0%, 100% { opacity: 0.6; transform: scale(1); }
-    50% { opacity: 1; transform: scale(1.1); }
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
   }
-
   /* ====== 🚀 Phase 4: 运行时微交互动画 ====== */
   @keyframes node-condense {
     0% { opacity: 0; filter: blur(10px); transform: scale(0.9); }

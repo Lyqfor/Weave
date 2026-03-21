@@ -50,12 +50,12 @@ export function Incarnation({ onSummon }: { onSummon: (text: string) => void }) 
             disabled={isTransitioning}
           />
           <button className="magic-send-btn" onClick={handleSummon} disabled={!inputValue.trim() || isTransitioning}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <polygon points="12 2 16 8 12 22 8 8 12 2" fill="rgba(139, 92, 246, 0.15)"></polygon>
-              <polygon points="12 2 20 8 16 8 12 2"></polygon>
-              <polygon points="12 2 4 8 8 8 12 2"></polygon>
-              <polygon points="16 8 20 8 12 22 16 8"></polygon>
-              <polygon points="8 8 4 8 12 22 8 8"></polygon>
+            {/* 💎 更加硬核的几何切割紫水晶 */}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2L19 9L12 22L5 9L12 2Z" fill="currentColor" fillOpacity="0.1" />
+              <path d="M12 2V22" opacity="0.5" />
+              <path d="M5 9H19" opacity="0.5" />
+              <path d="M12 2L5 9L12 13L19 9L12 2Z" />
             </svg>
           </button>
         </div>
