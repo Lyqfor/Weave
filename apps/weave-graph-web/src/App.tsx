@@ -41,6 +41,7 @@ import { LeftPanel } from "./components/layout/LeftPanel";
 import { RightPanel } from "./components/layout/RightPanel";
 import { CosmicBackground } from "./effects/CosmicBackground";
 import { usePerformance } from "./hooks/usePerformance";
+import { Incarnation } from "./components/Incarnation";
 
 const nodeTypes = { semantic: SemanticNode };
 const edgeTypes = { flow: FlowEdge };
@@ -155,7 +156,7 @@ function PortSection({
   );
 }
 
-function GraphCanvas({ isWeavingStarted }: { isWeavingStarted: boolean }) {
+function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStarted: boolean, setIsWeavingStarted: (val: boolean) => void }) {
   const dags = useGraphStore((s) => s.dags);
   const dagOrder = useGraphStore((s) => s.dagOrder);
   const activeDagId = useGraphStore((s) => s.activeDagId);
@@ -487,6 +488,13 @@ function GraphCanvas({ isWeavingStarted }: { isWeavingStarted: boolean }) {
         )}
 
         <main className="canvas-panel" style={{ flex: 1, position: "relative", overflow: "hidden", background: "transparent" }}>
+          {!isWeavingStarted && (
+            <Incarnation onSummon={(text) => {
+              console.log("Summoning:", text);
+              setIsWeavingStarted(true);
+            }} />
+          )}
+
           {isWeavingStarted && isCanvasEmpty && (
             <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none", zIndex: 1, gap: 0 }}>
               <div style={{ fontSize: 188, opacity: 0.8, userSelect: "none", lineHeight: 1 }}>🌌</div>
@@ -622,7 +630,7 @@ export default function App() {
 
   return (
     <ReactFlowProvider>
-      <GraphCanvas isWeavingStarted={isWeavingStarted} />
+      <GraphCanvas isWeavingStarted={isWeavingStarted} setIsWeavingStarted={setIsWeavingStarted} />
     </ReactFlowProvider>
   );
 }
