@@ -520,6 +520,11 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
   const tier = usePerformance();
 
   const handleSummonStart = useCallback(async (text: string) => {
+    // 连接未就绪时直接失败，让开屏回到可交互状态，避免进入只剩背景的过渡卡死。
+    if (wsStatus !== "connected") {
+      throw new Error("图服务连接未就绪，请稍后重试。");
+    }
+
     const sessionStorageKey = "weave.web.session.id";
     const existingSessionId = window.localStorage.getItem(sessionStorageKey);
     const sessionId = existingSessionId || `web-${crypto.randomUUID()}`;
@@ -534,7 +539,13 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
     };
 
     try {
-      const runInfo = await sendRpc<StartRunResponsePayload>("start.run", payload);
+      // 兜底超时：即使底层请求未进入 dispatched 计时，也要保证开屏不会无限悬挂。
+      const runInfo = await Promise.race<StartRunResponsePayload>([
+        sendRpc<StartRunResponsePayload>("start.run", payload),
+        new Promise<StartRunResponsePayload>((_, reject) => {
+          window.setTimeout(() => reject(new Error("启动超时，请检查图服务连接后重试。")), 12000);
+        })
+      ]);
       createDraftRun(runInfo.runId, runInfo.runId, text, runInfo.sessionId);
       setIsWeavingStarted(true);
 
@@ -552,7 +563,7 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
       }
       throw new Error(message);
     }
-  }, [createDraftRun, sendRpc, setIsWeavingStarted]);
+  }, [createDraftRun, sendRpc, setIsWeavingStarted, wsStatus]);
 
   return (
     <div

@@ -9,6 +9,30 @@
 
 ## 进度记录
 
+### 2026-03-22 - Entry 071 - 修复开屏转场后纯背景悬挂（连接就绪门禁 + 启动兜底超时）
+
+#### 范围
+`apps/weave-graph-web/src/App.tsx`
+
+#### 改动
+- 在 `handleSummonStart` 增加连接就绪检查：
+  - 当 `wsStatus !== "connected"` 时直接报错返回，避免开屏进入转场态后长期不可交互。
+- 为 `start.run` 增加 12 秒兜底超时：
+  - 使用 `Promise.race` 包裹启动请求，防止底层请求未进入 dispatched 计时时出现无限等待。
+- 该修复仅涉及启动流程控制，不改开屏视觉样式与布局结构。
+
+#### 验证
+- 静态检查通过：`apps/weave-graph-web/src/App.tsx` 无错误。
+- 构建通过：`pnpm --filter weave-graph-web build`。
+- 浏览器恢复回归通过：`pnpm verify:browser-recovery-e2e`
+  - `Browser recovery E2E verification passed.`
+
+#### 待解决问题
+- 若用户在服务刚启动阶段立即点击发送，当前会提示“连接未就绪”，属于预期防悬挂策略；可后续评估是否增加前端按钮态提示（本轮未改样式）。
+
+#### 下一步
+- 为 `handleSummonStart` 增加单测：覆盖 `wsStatus=disconnected/connecting` 与 `start.run` 超时路径。
+
 ### 2026-03-22 - Entry 070 - 开屏提交后空背景修复（前后端时序解耦 + 草稿会话承接）
 
 #### 范围
