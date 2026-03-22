@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { config as loadDotEnv } from "dotenv";
 import { z } from "zod";
 import type { LlmConfig } from "../../core/types/config.js";
@@ -25,6 +25,11 @@ const rawConfigSchema = z.object({
 export function loadLlmConfig(configPath = "config/llm.config.json"): LlmConfig {
   // 1) 读取配置文件并按 schema 做结构校验，避免运行时因字段缺失而崩溃。
   const absolutePath = resolve(process.cwd(), configPath);
+
+  // 子目录进程（如 apps/weave-graph-server）也能按配置文件位置回溯到仓库根目录 .env。
+  const envFromConfigRoot = join(dirname(absolutePath), "..", ".env");
+  loadDotEnv({ path: envFromConfigRoot, override: false });
+
   logger.info("config.read.start", "开始读取大模型配置", { configPath: absolutePath });
   const fileText = readFileSync(absolutePath, "utf8");
   const parsed = rawConfigSchema.parse(JSON.parse(fileText));

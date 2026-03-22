@@ -9,6 +9,29 @@
 
 ## 进度记录
 
+### 2026-03-22 - Entry 074 - 修复 graph-server 子目录启动时 Missing API key
+
+#### 范围
+`src/infrastructure/config/load-llm-config.ts`
+
+#### 改动
+- 在配置加载函数中新增按配置文件路径回溯 `.env`：
+  - 当进程工作目录位于子目录（如 `apps/weave-graph-server`）时，仍可从仓库根目录 `.env` 读取 `QWEN_API_KEY`。
+  - 解决前端触发 `start.run` 时由 graph-server 子进程链路报 `Missing API key` 的问题。
+
+#### 验证
+- 子目录模拟验证通过：在 `apps/weave-graph-server` 目录执行配置加载，输出 `SERVER_SIDE_CONFIG_OK`。
+- 重启全套图服务验证通过：
+  - `pnpm dev:graph:stop`
+  - `pnpm dev:graph:all`
+  - `apps/weave-graph-server/.run.log` 未出现 `Missing API key` / `Invalid apiKeyEnv`。
+
+#### 待解决问题
+- 当前仓库存在与本次问题无关的 `runtime-bridge.ts` 编译告警（类型签名变更导致），不影响本次 API key 读取修复的生效。
+
+#### 下一步
+- 清理 `runtime-bridge.ts` 的类型签名一致性问题，恢复 `verify:recovery-all` 在该分支下的全绿状态。
+
 ### 2026-03-22 - Entry 073 - 修复 Missing API key（apiKeyEnv 误填密钥值）
 
 #### 范围
