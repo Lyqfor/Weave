@@ -17,9 +17,16 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import "./app.css";
-import { useGraphStore, portContentToString, resolveRpc } from "./store/graph-store";
+import { useGraphStore, portContentToString, resolveRpc, markRpcDispatched, cancelRpcRequest } from "./store/graph-store";
 import { applyDagreLayoutAsync } from "./layout/dagre-layout";
-import type { GraphNodeData, GraphPort } from "./types/graph-events";
+import type {
+  GraphNodeData,
+  GraphPort,
+  StartRunPayload,
+  StartRunResponsePayload,
+  RunSubscribePayload,
+  RunSubscribeResponsePayload
+} from "./types/graph-events";
 import { SemanticNode } from "./nodes/semantic-node";
 import { FlowEdge } from "./edges/FlowEdge";
 import { ApprovalPanel } from "./components/ApprovalPanel";
@@ -164,6 +171,7 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
   const selectNode = useGraphStore((s) => s.selectNode);
   const applyActiveNodeChanges = useGraphStore((s) => s.applyActiveNodeChanges);
   const applyEnvelope = useGraphStore((s) => s.applyEnvelope);
+  const sendRpc = useGraphStore((s) => s.sendRpc);
   const pendingApprovalNodeId = useGraphStore((s) => s.pendingApprovalNodeId);
 
   const { fitView } = useReactFlow();
@@ -258,6 +266,9 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
   }, [activeDagId]);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const outboundQueueRef = useRef<Array<{ type: string; reqId: string; payload: unknown }>>([]);
   const [wsStatus, setWsStatus] = useState<"connecting" | "connected" | "disconnected">("connecting");
   const layoutCancelRef = useRef(false);
 
@@ -277,42 +288,161 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token") ?? "";
     const port = params.get("port") ?? "8787";
+    let disposed = false;
 
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/?token=${token}`);
-    wsRef.current = ws;
-    setWsStatus("connecting");
+    const flushOutboundQueue = () => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== ws.OPEN) {
+        return;
+      }
 
-    ws.onopen = () => setWsStatus("connected");
-    ws.onclose = () => setWsStatus("disconnected");
-    ws.onerror = () => setWsStatus("disconnected");
-
-    ws.onmessage = (message) => {
-      try {
-        const data = JSON.parse(String(message.data));
-        if (data.eventType === "server.response") {
-          resolveRpc(data.reqId, data.ok, data.error, data.payload);
-        } else {
-          applyEnvelope(data);
+      const queue = outboundQueueRef.current;
+      while (queue.length > 0 && ws.readyState === ws.OPEN) {
+        const envelope = queue.shift();
+        if (!envelope) break;
+        ws.send(JSON.stringify(envelope));
+        if (typeof envelope.reqId === "string") {
+          markRpcDispatched(envelope.reqId);
         }
-      } catch (e) {
-        console.error("Failed to parse WS message", e);
       }
     };
 
+    const resubscribeKnownRuns = async () => {
+      const dags = useGraphStore.getState().dags;
+      const latestByRun = new Map<string, { lastEventId?: string; updatedAt: string }>();
+
+      for (const dag of Object.values(dags)) {
+        const existing = latestByRun.get(dag.runId);
+        if (!existing || existing.updatedAt < dag.updatedAt) {
+          latestByRun.set(dag.runId, {
+            lastEventId: dag.lastEventId,
+            updatedAt: dag.updatedAt
+          });
+        }
+      }
+
+      const items = Array.from(latestByRun.entries());
+      const maxConcurrent = 4;
+      let cursor = 0;
+
+      const worker = async () => {
+        while (cursor < items.length) {
+          const currentIndex = cursor;
+          cursor += 1;
+          const [runId, meta] = items[currentIndex] ?? [];
+          if (!runId) {
+            continue;
+          }
+
+          try {
+            await sendRpc<RunSubscribeResponsePayload>("run.subscribe", {
+              runId,
+              lastEventId: meta.lastEventId
+            });
+          } catch (error) {
+            console.warn("run.subscribe on reconnect failed", { runId, error: String(error) });
+          }
+        }
+      };
+
+      const workers = Array.from({ length: Math.min(maxConcurrent, items.length) }, () => worker());
+      await Promise.all(workers);
+    };
+
+    const scheduleReconnect = () => {
+      if (disposed) return;
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+      }
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttemptRef.current), 5000);
+      reconnectTimerRef.current = window.setTimeout(() => {
+        connect();
+      }, delay);
+      reconnectAttemptRef.current += 1;
+    };
+
+    const connect = () => {
+      if (disposed) return;
+
+      setWsStatus("connecting");
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/?token=${token}`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        reconnectAttemptRef.current = 0;
+        setWsStatus("connected");
+        flushOutboundQueue();
+        void resubscribeKnownRuns();
+      };
+
+      ws.onclose = () => {
+        setWsStatus("disconnected");
+        scheduleReconnect();
+      };
+
+      ws.onerror = () => {
+        setWsStatus("disconnected");
+      };
+
+      ws.onmessage = (message) => {
+        try {
+          const data = JSON.parse(String(message.data));
+          if (data.eventType === "server.response") {
+            resolveRpc(data.reqId, data.ok, data.error, data.payload);
+          } else {
+            applyEnvelope(data);
+          }
+        } catch (e) {
+          console.error("Failed to parse WS message", e);
+        }
+      };
+    };
+
+    connect();
+
     const handleRpcSend = (e: any) => {
       const { envelope } = e.detail;
-      if (ws.readyState === ws.OPEN) {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === ws.OPEN) {
         ws.send(JSON.stringify(envelope));
+        if (typeof envelope.reqId === "string") {
+          markRpcDispatched(envelope.reqId);
+        }
+        return;
+      }
+
+      // 断线期间缓存出站 RPC，待重连后自动发送。
+      const queue = outboundQueueRef.current;
+      queue.push(envelope);
+      if (queue.length > 300) {
+        const dropped = queue.splice(0, queue.length - 300);
+        for (const droppedEnvelope of dropped) {
+          if (typeof droppedEnvelope.reqId === "string") {
+            cancelRpcRequest(droppedEnvelope.reqId, "RPC queue overflow");
+          }
+        }
       }
     };
     window.addEventListener("weave:rpc:send", handleRpcSend);
 
     return () => {
+      disposed = true;
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       window.removeEventListener("weave:rpc:send", handleRpcSend);
+      const pendingQueue = outboundQueueRef.current.splice(0);
+      for (const envelope of pendingQueue) {
+        if (typeof envelope.reqId === "string") {
+          cancelRpcRequest(envelope.reqId, "RPC canceled: websocket disposed");
+        }
+      }
+      const ws = wsRef.current;
       wsRef.current = null;
-      ws.close();
+      ws?.close();
     };
-  }, [applyEnvelope]);
+  }, [applyEnvelope, sendRpc]);
 
   // 6. Dagre 布局：增加全量依赖及尺寸触发器
   useEffect(() => {
@@ -452,6 +582,36 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const tier = usePerformance();
 
+  const handleSummonStart = useCallback(async (text: string) => {
+    const sessionStorageKey = "weave.web.session.id";
+    const existingSessionId = window.localStorage.getItem(sessionStorageKey);
+    const sessionId = existingSessionId || `web-${crypto.randomUUID()}`;
+    if (!existingSessionId) {
+      window.localStorage.setItem(sessionStorageKey, sessionId);
+    }
+
+    const payload: StartRunPayload = {
+      userInput: text,
+      sessionId,
+      clientRequestId: crypto.randomUUID()
+    };
+
+    try {
+      const runInfo = await sendRpc<StartRunResponsePayload>("start.run", payload);
+      const subscribePayload: RunSubscribePayload = {
+        runId: runInfo.runId
+      };
+      await sendRpc<RunSubscribeResponsePayload>("run.subscribe", subscribePayload);
+      setIsWeavingStarted(true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("AGENT_BUSY")) {
+        throw new Error("当前会话已有任务执行中，请等待或先终止。");
+      }
+      throw new Error(message);
+    }
+  }, [sendRpc, setIsWeavingStarted]);
+
   return (
     <div
       style={{
@@ -489,10 +649,7 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
 
         <main className="canvas-panel canvas-fade-in" style={{ flex: 1, position: "relative", overflow: "hidden", background: "transparent" }}>
           {!isWeavingStarted && (
-            <Incarnation onSummon={(text) => {
-              console.log("Summoning:", text);
-              setIsWeavingStarted(true);
-            }} />
+            <Incarnation onSummon={handleSummonStart} />
           )}
 
           {isWeavingStarted && isCanvasEmpty && (

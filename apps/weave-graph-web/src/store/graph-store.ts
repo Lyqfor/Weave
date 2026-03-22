@@ -11,6 +11,7 @@ import type {
   GraphPort,
   NodePendingApprovalPayload,
   NodeApprovalResolvedPayload,
+  RunSubscribePayload,
   RunStartPayload,
   NodeIoPayload
 } from "../types/graph-events";
@@ -21,9 +22,11 @@ export interface DagGraph {
   sessionId?: string;
   turnIndex?: number;
   userInputSummary?: string;
+  lastEventId?: string;
   nodes: Node<GraphNodeData>[];
   edges: Edge[];
   latestSeq: number;
+  seenEventIds: Record<string, true>;
   selectedNodeId?: string;
   lockedNodeIds: string[];
   updatedAt: string;
@@ -41,6 +44,7 @@ interface GraphState {
   selectNode: (nodeId?: string) => void;
   applyActiveNodeChanges: (changes: NodeChange[]) => void;
   clearPendingApproval: () => void;
+  resetRunForResync: (runId: string) => void;
   sendRpc: <T = unknown>(type: string, payload: unknown) => Promise<T>;
 }
 
@@ -49,21 +53,93 @@ interface GraphState {
 const pendingRequests = new Map<string, {
   resolve: (data: any) => void;
   reject: (err: string) => void;
-  timer: number;
+  timer?: number;
+  type: string;
+  payload: unknown;
+  resyncRetried?: boolean;
 }>();
+
+const RPC_TIMEOUT_MS = 15000;
+
+/** 标记 RPC 已经真正写入 WS，超时从这一刻开始计算，避免离线排队误超时。 */
+export const markRpcDispatched = (reqId: string) => {
+  const req = pendingRequests.get(reqId);
+  if (!req || req.timer !== undefined) {
+    return;
+  }
+
+  req.timer = window.setTimeout(() => {
+    const current = pendingRequests.get(reqId);
+    if (!current) return;
+    pendingRequests.delete(reqId);
+    current.reject("RPC Timeout");
+  }, RPC_TIMEOUT_MS);
+};
+
+/** 主动取消待处理 RPC（例如队列溢出、页面销毁）。 */
+export const cancelRpcRequest = (reqId: string, reason = "RPC Canceled") => {
+  const req = pendingRequests.get(reqId);
+  if (!req) return;
+  if (req.timer !== undefined) {
+    clearTimeout(req.timer);
+  }
+  pendingRequests.delete(reqId);
+  req.reject(reason);
+};
 
 /** 暴露给 App.tsx 处理 WS 返回消息 */
 export const resolveRpc = (reqId: string, ok: boolean, error?: string, payload?: any) => {
   const req = pendingRequests.get(reqId);
   if (!req) return;
   
-  clearTimeout(req.timer);
+  if (req.timer !== undefined) {
+    clearTimeout(req.timer);
+  }
   pendingRequests.delete(reqId);
   
   if (ok) {
     req.resolve(payload);
   } else {
-    req.reject(error || "Unknown RPC error");
+    const errorCode = typeof payload?.code === "string" ? payload.code : undefined;
+    const message = error || payload?.message || "Unknown RPC error";
+
+    // run.subscribe 游标失效自动恢复：清理本地游标并无游标重订阅。
+    if (errorCode === "RESYNC_REQUIRED" && req.type === "run.subscribe" && !req.resyncRetried) {
+      const subscribePayload = req.payload as Partial<RunSubscribePayload> | undefined;
+      const runId = subscribePayload?.runId?.trim();
+      if (runId) {
+        useGraphStore.getState().resetRunForResync(runId);
+
+        const retryReqId = crypto.randomUUID();
+        const retryPayload: RunSubscribePayload = { runId };
+        const retryEnvelope = {
+          type: "run.subscribe",
+          reqId: retryReqId,
+          payload: retryPayload
+        };
+
+        const retryTimer = window.setTimeout(() => {
+          if (pendingRequests.has(retryReqId)) {
+            pendingRequests.delete(retryReqId);
+            req.reject("RPC Timeout");
+          }
+        }, RPC_TIMEOUT_MS);
+
+        pendingRequests.set(retryReqId, {
+          resolve: req.resolve,
+          reject: req.reject,
+          timer: retryTimer,
+          type: "run.subscribe",
+          payload: retryPayload,
+          resyncRetried: true
+        });
+
+        window.dispatchEvent(new CustomEvent("weave:rpc:send", { detail: { envelope: retryEnvelope } }));
+        return;
+      }
+    }
+
+    req.reject(errorCode ? `${errorCode}: ${message}` : message);
   }
 };
 
@@ -85,6 +161,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       nodes: [],
       edges: [],
       latestSeq: 0,
+      seenEventIds: {},
       lockedNodeIds: [],
       updatedAt: timestamp
     };
@@ -99,6 +176,9 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   },
   applyEnvelope(evt) {
     const current = get().dags[evt.dagId] ?? get().ensureDag(evt.dagId, evt.runId, evt.timestamp);
+    if (evt.eventId && current.seenEventIds[evt.eventId]) {
+      return;
+    }
     if (evt.seq <= current.latestSeq) {
       return;
     }
@@ -109,6 +189,11 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         ...prev,
         runId: evt.runId,
         latestSeq: evt.seq,
+        lastEventId: evt.eventId,
+        seenEventIds: {
+          ...prev.seenEventIds,
+          ...(evt.eventId ? { [evt.eventId]: true } : {})
+        },
         updatedAt: evt.timestamp,
         nodes: [...prev.nodes],
         edges: [...prev.edges]
@@ -319,22 +404,54 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   clearPendingApproval() {
     set({ pendingApprovalNodeId: null, pendingApprovalPayload: null });
   },
+  resetRunForResync(runId) {
+    set((state) => {
+      const nextDags: GraphState["dags"] = { ...state.dags };
+      let hasChanges = false;
+
+      for (const [dagId, dag] of Object.entries(state.dags)) {
+        if (dag.runId !== runId) continue;
+        hasChanges = true;
+        nextDags[dagId] = {
+          ...dag,
+          lastEventId: undefined,
+          latestSeq: 0,
+          seenEventIds: {},
+          nodes: [],
+          edges: [],
+          selectedNodeId: undefined,
+          lockedNodeIds: [],
+          updatedAt: new Date().toISOString()
+        };
+      }
+
+      if (!hasChanges) {
+        return state;
+      }
+
+      return {
+        dags: nextDags,
+        pendingApprovalNodeId: null,
+        pendingApprovalPayload: null
+      };
+    });
+  },
   async sendRpc(type, payload) {
     const reqId = crypto.randomUUID();
     const envelope = { type, reqId, payload };
 
     return new Promise((resolve, reject) => {
-      // 触发自定义事件，由 App.tsx 中的 WebSocket 监听并发送
+      pendingRequests.set(reqId, {
+        resolve,
+        reject,
+        timer: undefined,
+        type,
+        payload,
+        resyncRetried: false
+      });
+
+      // 触发自定义事件，由 App.tsx 中的 WebSocket 监听并发送（真正发出后再开始超时计时）。
       window.dispatchEvent(new CustomEvent("weave:rpc:send", { detail: { envelope } }));
-
-      const timer = window.setTimeout(() => {
-        if (pendingRequests.has(reqId)) {
-          pendingRequests.delete(reqId);
-          reject("RPC Timeout");
-        }
-      }, 15000);
-
-      pendingRequests.set(reqId, { resolve, reject, timer });
     });
   }
 }));

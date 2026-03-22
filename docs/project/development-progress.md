@@ -2294,9 +2294,336 @@
 #### 下一步
 补充一轮真实 TTY 场景的录屏级验收（多轮输入 + DAG 展开收起 + Step Gate 选择）。
 
-## 当前待办清单
-- [ ] Tool registry + before/after hooks（M1）
-- [ ] Session memory persistence（M1）
-- [ ] Gateway（WebSocket first）（M1）
-- [ ] Skill dynamic injection（M2）
-- [ ] Event bus standardization for WEAVE-ready DAG events（M3）
+### 2026-03-22 - Entry 033 - Web 输入到网关 start.run 第一阶段打通
+
+#### 范围
+实现“前端输入框 -> WS RPC(start.run) -> 网关响应 runId”的最小闭环，作为后续接入 Orchestrator/WorkerPool 的第一步。
+
+#### 改动
+- 协议层：
+  - `apps/shared/graph-protocol.ts` 新增 `StartRunPayload`、`StartRunResponsePayload`。
+  - `ClientMessageEnvelope.type` 扩展支持 `start.run` / `run.abort` / `run.subscribe`（先定义协议，后续逐步落实现）。
+- 前端层：
+  - `Incarnation.tsx` 升级为异步提交，提交失败时恢复过渡态并显示错误信息。
+  - `App.tsx` 在 Summon 时发送 `start.run`，收到成功响应后再进入 DAG 画布。
+  - 新增本地 `sessionId` 复用策略（localStorage），并附带 `clientRequestId`。
+- 网关层：
+  - `ws-gateway.ts` 新增 `start.run` RPC 处理，返回 `runId/sessionId/acceptedAt`。
+  - 第一阶段占位广播 `run.start` 事件，便于前端链路联调和可观测。
+
+#### 影响文件
+- apps/shared/graph-protocol.ts
+- apps/weave-graph-web/src/types/graph-events.ts
+- apps/weave-graph-web/src/components/Incarnation.tsx
+- apps/weave-graph-web/src/App.tsx
+- apps/weave-graph-server/src/protocol/graph-events.ts
+- apps/weave-graph-server/src/gateway/ws-gateway.ts
+
+#### 验证
+- 计划执行：
+  - `pnpm --filter weave-graph-web build`
+  - `pnpm --filter weave-graph-server build`
+  - `pnpm build`
+  - `pnpm verify:step-gate`
+  - `pnpm verify:dag-matrix`
+
+#### 待解决问题
+- 当前 `start.run` 仍是网关占位处理，尚未进入真实 `AgentRuntime` 执行链路。
+- 事件游标（`lastEventId`）与增量回放尚未落地，本轮仅完成提交入口。
+
+#### 下一步
+实现网关命令路由与 RuntimeBridge：将 `start.run` 接到 Orchestrator/Worker，并引入 `eventId + seqId` 游标体系。
+
+### 2026-03-22 - Entry 034 - 网关游标回放与会话互斥（第二阶段）
+
+#### 范围
+在不改动 Runtime 内核的前提下，完成网关级“事件游标回放 + 同 Session Fast-Fail + run.abort 释放占用”的关键能力。
+
+#### 改动
+- 协议层：
+  - `GraphEnvelope` 增加 `eventId` 字段，作为前端去重与断线重放游标。
+  - 新增 `run.subscribe` / `run.abort` 的请求与响应负载类型。
+  - 新增标准 RPC 错误码：`AGENT_BUSY`、`RUN_NOT_FOUND`、`ABORT_NOT_ALLOWED`、`RESYNC_REQUIRED`、`INVALID_ARGUMENT`。
+- 网关层：
+  - 新增 `eventsByRunId` 回放缓存（Ring Buffer 思路）与 `runMetaByRunId` 状态表。
+  - `start.run` 增加同 session 快速失败：若已有运行中任务直接返回 `AGENT_BUSY`。
+  - 新增 `run.subscribe(runId, lastEventId)` 增量补发逻辑。
+  - 新增 `run.abort(runId)` 终止逻辑：广播 `run.end` 并释放 session 占用。
+  - `publish` 统一标准化 `eventId`，并在 `run.end` 时回收会话占用。
+- 前端层：
+  - `graph-store` 增加 `eventId` 去重与 `lastEventId` 记录，避免回放重复渲染。
+  - `resolveRpc` 透传错误码，支持前端识别 `AGENT_BUSY`。
+  - `App.tsx` 在 `start.run` 成功后立即执行 `run.subscribe`，并对 `AGENT_BUSY` 输出友好提示。
+
+#### 影响文件
+- apps/shared/graph-protocol.ts
+- apps/weave-graph-server/src/protocol/graph-events.ts
+- apps/weave-graph-server/src/projection/graph-projector.ts
+- apps/weave-graph-server/src/gateway/ws-gateway.ts
+- apps/weave-graph-web/src/types/graph-events.ts
+- apps/weave-graph-web/src/store/graph-store.ts
+- apps/weave-graph-web/src/App.tsx
+
+#### 验证
+- 计划执行：
+  - `pnpm --filter weave-graph-web build`
+  - `pnpm --filter weave-graph-server build`
+  - 网关 WS 脚本验证：`start.run` / `run.subscribe` / `run.abort` 三命令链路
+- 实际结果：
+  - `pnpm --filter weave-graph-web build` 通过。
+  - `pnpm --filter weave-graph-server build` 通过。
+  - `pnpm --filter weave-graph-server verify:gateway-rpc` 通过，输出 `Gateway RPC verification passed.`。
+  - 验证脚本已补强游标语义断言：`replayedCountBeforeAbort=0`、`replayedCountAfterAbort=1`，确认 `lastEventId` 后的增量回放生效。
+
+#### 待解决问题
+- `run.abort` 当前为网关层状态中断，尚未接入 Runtime 的 AbortController 深透传。
+- `run.subscribe` 当前回放来源为内存缓冲，WAL 回放降级尚未落地。
+
+#### 下一步
+引入 RuntimeBridge 与 RunRegistry，将 `run.abort` 绑定到真实 worker 信号中断，并补上 WAL 回放降级路径。
+
+### 2026-03-22 - Entry 2026-03-22-A - RuntimeBridge 与 RunRegistry 装配落地（第三阶段）
+
+#### 范围
+在 graph-server 内完成“网关命令层 -> 运行时桥接层”的可替换装配，消除网关与执行逻辑的强耦合，为后续接入真实 AgentRuntime 打基础。
+
+#### 改动
+- 网关层解耦：
+  - `ws-gateway.ts` 引入 `RunRegistry`，统一管理 session 占用与 run 状态迁移。
+  - 新增 `registerRunCommandHandlers`，支持注入 `startRun/abortRun` 处理器。
+  - 保留无处理器回退路径（兼容现有验证脚本与联调方式）。
+- 运行时桥接层：
+  - 新增 `src/runtime/runtime-bridge.ts`，定义 `RuntimeBridge` 接口与 `LocalRuntimeBridge` 本地实现。
+  - `LocalRuntimeBridge` 当前以定时器模拟运行完成与中止事件，事件统一回调到 `GraphProjector`。
+- 服务装配层：
+  - `index.ts` 装配 `LocalRuntimeBridge`，将 `start.run/run.abort` 从网关逻辑下沉到桥接处理器。
+  - 移除入口 demo 事件注入，改为由运行命令驱动真实事件流。
+
+#### 影响文件
+- apps/weave-graph-server/src/runtime/run-registry.ts
+- apps/weave-graph-server/src/runtime/runtime-bridge.ts
+- apps/weave-graph-server/src/gateway/ws-gateway.ts
+- apps/weave-graph-server/src/index.ts
+
+#### 验证
+- `pnpm --filter weave-graph-server build` 通过。
+- `pnpm --filter weave-graph-server verify:gateway-rpc` 通过。
+  - 输出：`replayedCountBeforeAbort=0`、`replayedCountAfterAbort=1`。
+- `pnpm --filter weave-graph-web build` 通过。
+
+#### 待解决问题
+- 当前 `LocalRuntimeBridge` 仍是占位执行器，尚未接入真实 `AgentRuntime.runOnceStream`。
+- `run.abort` 尚未贯穿到真实 LLM/tool 执行取消链路（AbortController 深透传）。
+
+#### 下一步
+以 `RuntimeBridge` 接口为边界接入真实 AgentRuntime 实现，落地 `RunRegistry + AbortController` 的物理级中断，并补齐 WAL 回放降级路径。
+
+### 2026-03-22 - Entry 2026-03-22-B - 真实 AgentRuntime 桥接与中断透传（第四阶段）
+
+#### 范围
+将 graph-server 的桥接层从“仅本地占位执行器”升级为“优先接入真实 AgentRuntime，失败自动回退本地桥接”，并补齐 run 级 AbortSignal 透传链路。
+
+#### 改动
+- Runtime 桥接：
+  - `apps/weave-graph-server/src/runtime/runtime-bridge.ts` 新增自动桥接工厂 `createRuntimeBridge`。
+  - 优先动态加载主工程 `AgentRuntime + loadLlmConfig + ToolRegistry + builtinTools`，创建 `AgentRuntimeBridge`。
+  - 若动态加载失败，自动回退到 `LocalRuntimeBridge`（不中断开发联调）。
+- 中断透传：
+  - `src/engine/runner-types.ts` 的 `RunOnceStreamOptions` 新增 `abortSignal`。
+  - `src/agent/run-agent.ts` 在 DAG 执行层监听外部 `abortSignal`，桥接到内部 `AbortController`。
+  - `src/session/run-context.ts` 补充 `bus` 字段类型，修复 StepGate 拦截器对 `ctx.bus` 的静态类型依赖。
+- 回归修复：
+  - `src/engine/engine-types.ts` 恢复 `snapshotStore?: SnapshotStore`，修复根工程构建错误。
+  - `src/nodes/tool-node.ts` 恢复 `tool.execution.start/end` 事件发射，修复 StepGate 与 DAG 矩阵脚本断言。
+
+#### 影响文件
+- apps/weave-graph-server/src/runtime/runtime-bridge.ts
+- apps/weave-graph-server/src/index.ts
+- src/engine/runner-types.ts
+- src/agent/run-agent.ts
+- src/session/run-context.ts
+- src/engine/engine-types.ts
+- src/nodes/tool-node.ts
+
+#### 验证
+- 网关与前端：
+  - `pnpm --filter weave-graph-server verify:gateway-rpc` 通过。
+  - 输出：`replayedCountBeforeAbort=0`、`replayedCountAfterAbort=1`。
+  - `pnpm --filter weave-graph-web build` 通过。
+- 根工程回归：
+  - `pnpm build` 通过。
+  - `pnpm verify:step-gate` 通过。
+  - `pnpm verify:dag-matrix` 通过。
+
+#### 待解决问题
+- 真实 LLM 请求层尚未将 `AbortSignal` 透传到 OpenAI SDK 调用参数，当前为引擎层中断优先。
+- `run.subscribe` 仍以内存回放为主，WAL 回放降级待补齐。
+
+#### 下一步
+将 `AbortSignal` 继续下探到 QwenClient/OpenAI create 调用，并补齐 WAL 回放降级路径与 `RESYNC_REQUIRED` 语义。
+
+### 2026-03-22 - Entry 2026-03-22-C - WAL 回放降级与游标失效兜底（第五阶段）
+
+#### 范围
+在网关订阅链路落地“内存 RingBuffer -> WAL 重建回放 -> `RESYNC_REQUIRED`”三级策略，消除仅靠内存缓存的回放脆弱性。
+
+#### 改动
+- 网关订阅策略升级：
+  - `apps/weave-graph-server/src/gateway/ws-gateway.ts`
+  - `run.subscribe` 改为优先命中内存缓存；若缓存缺失或游标不在缓存中，则调用回放处理器进行 WAL 降级重建。
+  - 若提供 `lastEventId` 且在内存与 WAL 回放结果中均不存在，则返回 `RESYNC_REQUIRED`，要求客户端做全量重订阅。
+- 运行桥接扩展：
+  - `apps/weave-graph-server/src/runtime/runtime-bridge.ts`
+  - `RuntimeBridge` 新增可选能力 `loadRunEvents(runId)`，用于从 WAL 加载 run 级原始事件。
+  - `AgentRuntimeBridge` 动态装配 `WeaveDb + WalDao`，实现 `getExecutionWalEvents` 读取。
+  - 动态加载策略升级为 `dist/*.js` 优先、`src/*.ts` 回退，提升在 `node dist` 与 `tsx src` 两种启动模式下命中真实桥接的稳定性。
+  - `LocalRuntimeBridge` 返回 `null`（无 WAL 能力），保持本地占位行为兼容。
+- 服务端装配：
+  - `apps/weave-graph-server/src/index.ts`
+  - 新增 `replayRunEvents` 处理器：调用 `runtimeBridge.loadRunEvents` 取原始事件，再用独立 `GraphProjector` 重建图事件序列。
+- 自动化验证增强：
+  - `apps/weave-graph-server/scripts/verify-gateway-rpc.mjs`
+  - 增加“无效游标必须返回 `RESYNC_REQUIRED`”断言。
+
+#### 影响文件
+- apps/weave-graph-server/src/gateway/ws-gateway.ts
+- apps/weave-graph-server/src/runtime/runtime-bridge.ts
+- apps/weave-graph-server/src/index.ts
+- apps/weave-graph-server/scripts/verify-gateway-rpc.mjs
+
+#### 验证
+- `pnpm --filter weave-graph-server build` 通过。
+- `pnpm --filter weave-graph-server verify:gateway-rpc` 通过。
+  - 关键输出：`invalidCursorCode: 'RESYNC_REQUIRED'`。
+- `pnpm --filter weave-graph-web build` 通过。
+- `pnpm verify:step-gate` 通过。
+- `pnpm verify:dag-matrix` 通过。
+
+#### 待解决问题
+- WAL 事件 `payload` 目前按 `JSON.parse` 解析；复杂循环引用对象在极端场景下仍建议切换到与写入端一致的反序列化策略。
+- 客户端尚未实现收到 `RESYNC_REQUIRED` 后自动清空本地游标并重订阅的恢复流程。
+
+#### 下一步
+实现前端 `RESYNC_REQUIRED` 自动恢复：清理本地 `lastEventId/seenEventIds` 后发起无游标 `run.subscribe`，并补充断线重连集成用例。
+
+### 2026-03-22 - Entry 2026-03-22-D - 前端 RESYNC_REQUIRED 自动恢复（第六阶段）
+
+#### 范围
+在 Web 客户端落地 `RESYNC_REQUIRED` 自动恢复逻辑，确保游标失效后无需手工刷新即可恢复订阅。
+
+#### 改动
+- 状态层自动恢复：
+  - `apps/weave-graph-web/src/store/graph-store.ts`
+  - 扩展 pending RPC 记录，保存 `type/payload` 元信息用于恢复判断。
+  - 在 `resolveRpc` 中识别 `run.subscribe + RESYNC_REQUIRED`：
+    - 调用 `resetRunForResync(runId)` 清理本地游标与该 run 图状态；
+    - 自动重发无 `lastEventId` 的 `run.subscribe`；
+    - 将原 Promise 的 `resolve/reject` 透传给重试请求，保持调用方无感。
+- 新增状态恢复动作：
+  - `resetRunForResync(runId)` 重置 `lastEventId/seenEventIds/latestSeq`，并清空该 run 的节点与边，避免全量重放时产生增量重复。
+
+#### 影响文件
+- apps/weave-graph-web/src/store/graph-store.ts
+
+#### 验证
+- `pnpm --filter weave-graph-web build` 通过。
+- `pnpm --filter weave-graph-server verify:gateway-rpc` 通过（含 `invalidCursorCode: 'RESYNC_REQUIRED'`）。
+
+#### 待解决问题
+- 当前自动恢复覆盖 `run.subscribe` 的游标失效场景；断网重连后的自动重订阅调度（按活跃 run 批量恢复）仍需补完。
+- 尚缺浏览器侧集成测试脚本验证“服务端重启 + 客户端自动恢复”完整路径。
+
+#### 下一步
+补充断网/服务重启场景的自动重订阅管理器，并增加端到端恢复用例（至少覆盖 active run 与 completed run 两类）。
+
+### 2026-03-22 - Entry 2026-03-22-E - WebSocket 自动重连与已知 Run 重订阅（第七阶段）
+
+#### 范围
+补齐浏览器侧断线恢复主链路：WS 自动重连 + 已知 run 批量重订阅，提升服务重启与短时断网后的恢复能力。
+
+#### 改动
+- WebSocket 生命周期升级：
+  - `apps/weave-graph-web/src/App.tsx`
+  - 将单次连接改为可重连模型，支持指数退避（上限 5s）。
+  - `onopen` 后自动触发 run 重订阅流程。
+- 批量重订阅：
+  - 基于 store 中现有 `dags` 计算每个 `runId` 的最新游标，逐个发送 `run.subscribe(runId,lastEventId)`。
+  - 若单 run 重订阅失败，按警告处理，不阻断其他 run 的恢复。
+- 与 `RESYNC_REQUIRED` 自动恢复联动：
+  - 重订阅若命中游标失效，将由 `graph-store.ts` 中的自动恢复机制继续执行“清理本地状态 + 无游标重订阅”。
+
+#### 影响文件
+- apps/weave-graph-web/src/App.tsx
+
+#### 验证
+- `pnpm --filter weave-graph-web build` 通过。
+- `pnpm --filter weave-graph-server verify:gateway-rpc` 通过。
+
+#### 待解决问题
+- 尚缺浏览器端自动化场景测试（例如 Playwright）来验证“网关重启后自动恢复”的真实交互路径。
+- 当前重订阅是串行执行；当 run 数量较多时可优化为受控并发。
+
+#### 下一步
+补充 Web 端恢复场景自动化测试，并将批量重订阅优化为受控并发（例如并发度 3~5）。
+
+### 2026-03-22 - Entry 2026-03-22-F - 恢复链路性能优化（第八阶段）
+
+#### 范围
+优化断线恢复时的请求可靠性与恢复吞吐：补齐 WS 断线期间 RPC 缓存发送能力，并将重订阅改为受控并发。
+
+#### 改动
+- 出站 RPC 队列：
+  - `apps/weave-graph-web/src/App.tsx`
+  - 新增 `outboundQueueRef`，当 WS 非 `OPEN` 状态时暂存 RPC 信封。
+  - 连接恢复后 `flushOutboundQueue()` 自动发送积压请求，避免请求因瞬断直接丢失。
+  - 队列设置上限 300，防止异常网络下无限增长。
+- 重订阅并发优化：
+  - 将重连后的 `run.subscribe` 从串行改为受控并发（并发度 4）。
+  - 单 run 失败仅告警，不中断其他 run 的恢复流程。
+
+#### 影响文件
+- apps/weave-graph-web/src/App.tsx
+
+#### 验证
+- `pnpm --filter weave-graph-web build` 通过。
+- `pnpm --filter weave-graph-server verify:gateway-rpc` 通过。
+
+#### 待解决问题
+- RPC 队列目前仅内存态，浏览器刷新后不会保留（属于可接受的短瞬断优化，不是离线持久队列）。
+- 尚缺针对“队列积压后重连自动 flush”与“并发重订阅成功率”的自动化场景测试。
+
+#### 下一步
+补充 Web 端恢复链路自动化测试（含队列 flush 与并发重订阅场景），并评估是否需要持久化队列策略。
+
+### 2026-03-22 - Entry 2026-03-22-G - 离线队列可靠性修复（第九阶段）
+
+#### 范围
+修复离线排队下 RPC 计时过早导致的误超时问题，并补齐队列淘汰/销毁场景的显式失败回传。
+
+#### 改动
+- RPC 超时策略修复：
+  - `apps/weave-graph-web/src/store/graph-store.ts`
+  - 新增 `markRpcDispatched(reqId)`：仅在请求真正写入 WS 后启动超时计时。
+  - `sendRpc` 不再创建“排队即开始”的超时，避免重连前误判超时。
+- 主动取消能力：
+  - 新增 `cancelRpcRequest(reqId, reason)`，用于队列溢出或页面销毁时显式 reject 对应 Promise。
+- App 发送链路对齐：
+  - `apps/weave-graph-web/src/App.tsx`
+  - 立即发送与队列 flush 后均调用 `markRpcDispatched`。
+  - 队列超限丢弃时逐条 `cancelRpcRequest("RPC queue overflow")`。
+  - 组件销毁时取消尚未发送的队列请求，避免 Promise 悬挂。
+
+#### 影响文件
+- apps/weave-graph-web/src/store/graph-store.ts
+- apps/weave-graph-web/src/App.tsx
+
+#### 验证
+- `pnpm --filter weave-graph-web build` 通过。
+- `get_errors` 检查 `App.tsx` 与 `graph-store.ts` 均无错误。
+
+#### 待解决问题
+- 仍缺“离线排队 -> 重连 flush -> 超时行为”自动化测试覆盖。
+- 仍缺“队列溢出触发 cancel”自动化断言。
+
+#### 下一步
+新增 Web 恢复链路自动化测试，优先覆盖：排队后重连成功、排队后溢出取消、未发送请求不应提前超时。

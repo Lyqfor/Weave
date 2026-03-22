@@ -293,16 +293,34 @@ dagent/
 - `apps/weave-graph-server/src/gateway/ws-gateway.ts`
   - 本地 WS 网关（127.0.0.1 + token + Origin 校验 + 心跳）。
   - 提供 `POST /ingest/runtime-event` 接口，接收主 CLI 转发的 Runtime 事件。
+  - 新增可插拔命令处理器：`registerRunCommandHandlers(startRun/abortRun/replayRunEvents)`，隔离网关与执行器实现。
+  - 新增会话互斥与游标回放能力：`run.subscribe(lastEventId)` 增量补发、`AGENT_BUSY` 快速失败、`run.abort` 占用释放。
+  - 回放策略已升级为三级：内存 RingBuffer 命中 -> WAL 重建回放降级 -> 游标失效返回 `RESYNC_REQUIRED`。
 - `apps/weave-graph-server/src/index.ts`
-  - 服务端骨架入口，连接 Runtime 事件转发链并输出 `ingestUrl + token`。
+  - 服务端装配入口：连接 Runtime 事件投影链，并装配 `createRuntimeBridge`（真实 AgentRuntime 优先，失败回退本地桥接）与网关命令处理器。
+- `apps/weave-graph-server/src/runtime/run-registry.ts`
+  - 运行状态注册表：维护 run 与 session 占用关系，提供 Fast-Fail 并发守卫与状态迁移。
+- `apps/weave-graph-server/src/runtime/runtime-bridge.ts`
+  - 运行时桥接接口：定义 `startRun/abortRun` 契约，并提供自动桥接工厂 `createRuntimeBridge`。
+  - 当前策略：优先动态装配真实 AgentRuntime（含 LLM 配置加载与内置工具注册）；装配失败时自动回退本地桥接，保证网关联调链路不断。
+  - 动态装配路径采用 `dist/*.js` 优先与 `src/*.ts` 回退双策略，兼容构建态与开发态启动方式。
+  - 新增可选回放能力：`loadRunEvents(runId)`，由 AgentRuntimeBridge 通过 `WeaveDb + WalDao` 读取 WAL 原始事件，供网关订阅降级回放使用。
 - `apps/weave-graph-web/src/store/graph-store.ts`
   - Zustand 图状态单一真相源与增量事件应用（含默认 label 可见性策略）。
+  - 新增 `eventId` 去重与 `lastEventId` 游标记录，支撑断线重连补发。
+  - 新增 `RESYNC_REQUIRED` 自动恢复：游标失效时自动清理 run 本地状态并发起无游标 `run.subscribe` 重订阅。
+  - RPC 超时改为“请求真正写入 WS 后计时”，并支持请求级主动取消（队列溢出/组件销毁场景）。
 - `apps/weave-graph-web/src/layout/dagre-layout.ts`
   - Dagre 自动布局管线（首阶段全量布局）。
 - `apps/weave-graph-web/src/workers/layout.worker.ts`
   - 布局 Worker 预留骨架（后续 ELK 增量布局）。
 - `apps/weave-graph-web/src/App.tsx`
   - React Flow 主界面骨架与 WS 接入。
+  - 新增 Summon -> `start.run` RPC 启动逻辑，成功后才切换到 DAG 主画布。
+  - 新增 WebSocket 自动重连与已知 run 批量重订阅（断网/服务重启后自动恢复）。
+  - 新增断线期间 RPC 出站队列与重连后自动 flush，降低瞬断时 RPC 丢失概率。
+  - 批量重订阅已升级为受控并发执行，提升多 run 场景恢复速度。
+  - 出站请求发送后会回调 store 标记 `dispatched`，保证超时基于真实网络发送时刻。
 
 ## 对照 PRD 的当前实现状态
 
@@ -322,8 +340,8 @@ dagent/
 - Orchestrator 队列与 run 生命周期管理。
 - 记忆子系统（session + long-term 持久化）。
 - 工具调用循环与 hooks 生命周期。
-- Gateway 层（WebSocket/HTTP）。
 - 统一事件总线治理与跨端事件协议收敛。
+- 浏览器侧恢复链路自动化测试（重连 + 队列 flush + 重订阅 + RESYNC 自愈）尚未实现。
 
 ## 更新规则
 - 每次新增目录/模块或职责变更时，必须同步更新本文件。
