@@ -2732,3 +2732,39 @@
 
 #### 下一步
 补齐浏览器端 E2E 场景，将当前逻辑级/网关级验证延伸到交互级闭环验证。
+
+### 2026-03-22 - Entry 2026-03-22-K - WS 恢复控制器抽离与集成验证（第十三阶段）
+
+#### 范围
+将 App 内离线队列与重连恢复逻辑抽离为控制器，补充联动级自动化验证，进一步降低恢复流程回归风险。
+
+#### 改动
+- 抽离控制器：
+  - `apps/weave-graph-web/src/lib/ws-recovery-controller.ts`
+  - 封装 `enqueueOrSend/flushQueueOnReconnect/resubscribeRuns/cancelPendingQueue`。
+- App 集成：
+  - `apps/weave-graph-web/src/App.tsx`
+  - 用 `WsRecoveryController` 替换原有内联队列/并发重订阅逻辑。
+- 新增联动验证脚本：
+  - `scripts/verify-ws-recovery-controller.ts`
+  - 覆盖离线入队、超限淘汰取消、重连刷空、重订阅并发上限。
+- 命令接入：
+  - 根 `package.json` 新增 `verify:ws-recovery-controller`。
+
+#### 影响文件
+- apps/weave-graph-web/src/lib/ws-recovery-controller.ts
+- apps/weave-graph-web/src/App.tsx
+- scripts/verify-ws-recovery-controller.ts
+- package.json
+
+#### 验证
+- `pnpm verify:ws-recovery-controller` 通过。
+- `pnpm verify:rpc-pending` 通过。
+- `pnpm --filter weave-graph-web build` 通过。
+- 相关文件 `get_errors` 均无错误。
+
+#### 待解决问题
+- 目前自动化仍以逻辑级与网关级为主，尚缺浏览器真实页面级 E2E（网络抖动、连接恢复）验证。
+
+#### 下一步
+引入浏览器端 E2E（建议 Playwright）覆盖真实页面断线重连与恢复链路。

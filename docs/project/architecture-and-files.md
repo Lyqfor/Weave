@@ -272,6 +272,8 @@ dagent/
   - 网关重连回放集成脚本：覆盖跨连接 `run.subscribe` 增量回放与 `run.abort` 后回放一致性。
 - `scripts/verify-rpc-pending.ts`
   - RPC Pending 状态机验证脚本：覆盖“未发送不超时、发送后超时、取消语义、成功消费”关键语义。
+- `scripts/verify-ws-recovery-controller.ts`
+  - WS 恢复控制器联动验证脚本：覆盖离线入队、队列淘汰取消、重连刷空与重订阅并发上限。
 - `src/weave/weave-dag-prompt.md`
   - Weave 历史提示词文档（当前观察者模式不再依赖运行时注入）。
 
@@ -324,6 +326,9 @@ dagent/
 - `apps/weave-graph-web/src/lib/rpc-pending-manager.ts`
   - RPC Pending 生命周期管理器：统一处理注册、发送后计时、取消、消费语义。
   - 作为 `graph-store` 的请求状态机底座，保证超时语义稳定可测。
+- `apps/weave-graph-web/src/lib/ws-recovery-controller.ts`
+  - WS 恢复控制器：封装离线队列、重连刷空、run 重订阅恢复与销毁取消。
+  - 与 `recovery-utils`、`rpc-pending-manager` 组合形成可测试的恢复链路模块。
 - `apps/weave-graph-web/src/workers/layout.worker.ts`
   - 布局 Worker 预留骨架（后续 ELK 增量布局）。
 - `apps/weave-graph-web/src/App.tsx`

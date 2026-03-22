@@ -19,7 +19,7 @@ import "reactflow/dist/style.css";
 import "./app.css";
 import { useGraphStore, portContentToString, resolveRpc, markRpcDispatched, cancelRpcRequest } from "./store/graph-store";
 import { applyDagreLayoutAsync } from "./layout/dagre-layout";
-import { buildRunSubscribePlan, enqueueWithLimit, flushQueue, runWithConcurrency } from "./lib/recovery-utils";
+import { WsRecoveryController } from "./lib/ws-recovery-controller";
 import type {
   GraphNodeData,
   GraphPort,
@@ -269,7 +269,7 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
-  const outboundQueueRef = useRef<Array<{ type: string; reqId: string; payload: unknown }>>([]);
+  const recoveryControllerRef = useRef<WsRecoveryController | null>(null);
   const [wsStatus, setWsStatus] = useState<"connecting" | "connected" | "disconnected">("connecting");
   const layoutCancelRef = useRef(false);
 
@@ -291,39 +291,22 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
     const port = params.get("port") ?? "8787";
     let disposed = false;
 
-    const flushOutboundQueue = () => {
-      const ws = wsRef.current;
-      if (!ws || ws.readyState !== ws.OPEN) {
-        return;
-      }
-
-      flushQueue(
-        outboundQueueRef.current,
-        () => ws.readyState === ws.OPEN,
-        (envelope) => {
-          ws.send(JSON.stringify(envelope));
-          if (typeof envelope.reqId === "string") {
-            markRpcDispatched(envelope.reqId);
-          }
+    recoveryControllerRef.current = new WsRecoveryController({
+      canSend: () => {
+        const ws = wsRef.current;
+        return Boolean(ws && ws.readyState === ws.OPEN);
+      },
+      sendEnvelope: (envelope) => {
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== ws.OPEN) {
+          return;
         }
-      );
-    };
-
-    const resubscribeKnownRuns = async () => {
-      const dags = useGraphStore.getState().dags;
-      const items = buildRunSubscribePlan(dags);
-
-      await runWithConcurrency(items, 4, async (item) => {
-        try {
-          await sendRpc<RunSubscribeResponsePayload>("run.subscribe", {
-            runId: item.runId,
-            lastEventId: item.lastEventId
-          });
-        } catch (error) {
-          console.warn("run.subscribe on reconnect failed", { runId: item.runId, error: String(error) });
-        }
-      });
-    };
+        ws.send(JSON.stringify(envelope));
+      },
+      markDispatched: (reqId) => markRpcDispatched(reqId),
+      cancelRequest: (reqId, reason) => cancelRpcRequest(reqId, reason),
+      sendRpc: (type, payload) => sendRpc<RunSubscribeResponsePayload>(type, payload)
+    });
 
     const scheduleReconnect = () => {
       if (disposed) return;
@@ -347,8 +330,8 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
       ws.onopen = () => {
         reconnectAttemptRef.current = 0;
         setWsStatus("connected");
-        flushOutboundQueue();
-        void resubscribeKnownRuns();
+        recoveryControllerRef.current?.flushQueueOnReconnect();
+        void recoveryControllerRef.current?.resubscribeRuns(useGraphStore.getState().dags);
       };
 
       ws.onclose = () => {
@@ -378,25 +361,7 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
 
     const handleRpcSend = (e: any) => {
       const { envelope } = e.detail;
-      const ws = wsRef.current;
-      if (ws && ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify(envelope));
-        if (typeof envelope.reqId === "string") {
-          markRpcDispatched(envelope.reqId);
-        }
-        return;
-      }
-
-      // 断线期间缓存出站 RPC，待重连后自动发送。
-      const queue = outboundQueueRef.current;
-      const dropped = enqueueWithLimit(queue, envelope, 300);
-      if (dropped.length > 0) {
-        for (const droppedEnvelope of dropped) {
-          if (typeof droppedEnvelope.reqId === "string") {
-            cancelRpcRequest(droppedEnvelope.reqId, "RPC queue overflow");
-          }
-        }
-      }
+      recoveryControllerRef.current?.enqueueOrSend(envelope);
     };
     window.addEventListener("weave:rpc:send", handleRpcSend);
 
@@ -407,12 +372,8 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
         reconnectTimerRef.current = null;
       }
       window.removeEventListener("weave:rpc:send", handleRpcSend);
-      const pendingQueue = outboundQueueRef.current.splice(0);
-      for (const envelope of pendingQueue) {
-        if (typeof envelope.reqId === "string") {
-          cancelRpcRequest(envelope.reqId, "RPC canceled: websocket disposed");
-        }
-      }
+      recoveryControllerRef.current?.cancelPendingQueue();
+      recoveryControllerRef.current = null;
       const ws = wsRef.current;
       wsRef.current = null;
       ws?.close();
