@@ -19,6 +19,7 @@ import "reactflow/dist/style.css";
 import "./app.css";
 import { useGraphStore, portContentToString, resolveRpc, markRpcDispatched, cancelRpcRequest } from "./store/graph-store";
 import { applyDagreLayoutAsync } from "./layout/dagre-layout";
+import { buildRunSubscribePlan, enqueueWithLimit, flushQueue, runWithConcurrency } from "./lib/recovery-utils";
 import type {
   GraphNodeData,
   GraphPort,
@@ -296,57 +297,32 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
         return;
       }
 
-      const queue = outboundQueueRef.current;
-      while (queue.length > 0 && ws.readyState === ws.OPEN) {
-        const envelope = queue.shift();
-        if (!envelope) break;
-        ws.send(JSON.stringify(envelope));
-        if (typeof envelope.reqId === "string") {
-          markRpcDispatched(envelope.reqId);
+      flushQueue(
+        outboundQueueRef.current,
+        () => ws.readyState === ws.OPEN,
+        (envelope) => {
+          ws.send(JSON.stringify(envelope));
+          if (typeof envelope.reqId === "string") {
+            markRpcDispatched(envelope.reqId);
+          }
         }
-      }
+      );
     };
 
     const resubscribeKnownRuns = async () => {
       const dags = useGraphStore.getState().dags;
-      const latestByRun = new Map<string, { lastEventId?: string; updatedAt: string }>();
+      const items = buildRunSubscribePlan(dags);
 
-      for (const dag of Object.values(dags)) {
-        const existing = latestByRun.get(dag.runId);
-        if (!existing || existing.updatedAt < dag.updatedAt) {
-          latestByRun.set(dag.runId, {
-            lastEventId: dag.lastEventId,
-            updatedAt: dag.updatedAt
+      await runWithConcurrency(items, 4, async (item) => {
+        try {
+          await sendRpc<RunSubscribeResponsePayload>("run.subscribe", {
+            runId: item.runId,
+            lastEventId: item.lastEventId
           });
+        } catch (error) {
+          console.warn("run.subscribe on reconnect failed", { runId: item.runId, error: String(error) });
         }
-      }
-
-      const items = Array.from(latestByRun.entries());
-      const maxConcurrent = 4;
-      let cursor = 0;
-
-      const worker = async () => {
-        while (cursor < items.length) {
-          const currentIndex = cursor;
-          cursor += 1;
-          const [runId, meta] = items[currentIndex] ?? [];
-          if (!runId) {
-            continue;
-          }
-
-          try {
-            await sendRpc<RunSubscribeResponsePayload>("run.subscribe", {
-              runId,
-              lastEventId: meta.lastEventId
-            });
-          } catch (error) {
-            console.warn("run.subscribe on reconnect failed", { runId, error: String(error) });
-          }
-        }
-      };
-
-      const workers = Array.from({ length: Math.min(maxConcurrent, items.length) }, () => worker());
-      await Promise.all(workers);
+      });
     };
 
     const scheduleReconnect = () => {
@@ -413,9 +389,8 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
 
       // 断线期间缓存出站 RPC，待重连后自动发送。
       const queue = outboundQueueRef.current;
-      queue.push(envelope);
-      if (queue.length > 300) {
-        const dropped = queue.splice(0, queue.length - 300);
+      const dropped = enqueueWithLimit(queue, envelope, 300);
+      if (dropped.length > 0) {
         for (const droppedEnvelope of dropped) {
           if (typeof droppedEnvelope.reqId === "string") {
             cancelRpcRequest(droppedEnvelope.reqId, "RPC queue overflow");

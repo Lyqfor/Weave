@@ -266,6 +266,8 @@ dagent/
   - 支持插件钩子返回单条或多条输出事件。
 - `scripts/verify-dag-matrix.mjs`
   - DAG 语义测试矩阵脚本：覆盖环路、死锁、依赖缺失、重试、超时、审批中断恢复、一致性回归。
+- `scripts/verify-graph-recovery.ts`
+  - 恢复链路验证脚本：覆盖重订阅计划去重、离线队列淘汰、FIFO 刷新与并发上限控制。
 - `src/weave/weave-dag-prompt.md`
   - Weave 历史提示词文档（当前观察者模式不再依赖运行时注入）。
 
@@ -312,6 +314,9 @@ dagent/
   - RPC 超时改为“请求真正写入 WS 后计时”，并支持请求级主动取消（队列溢出/组件销毁场景）。
 - `apps/weave-graph-web/src/layout/dagre-layout.ts`
   - Dagre 自动布局管线（首阶段全量布局）。
+- `apps/weave-graph-web/src/lib/recovery-utils.ts`
+  - 恢复链路纯函数工具：run 重订阅计划构建、离线队列上限控制、队列刷空、受控并发执行。
+  - 供 `App.tsx` 与验证脚本复用，降低恢复逻辑回归风险。
 - `apps/weave-graph-web/src/workers/layout.worker.ts`
   - 布局 Worker 预留骨架（后续 ELK 增量布局）。
 - `apps/weave-graph-web/src/App.tsx`

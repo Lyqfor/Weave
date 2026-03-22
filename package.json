@@ -12,10 +12,12 @@
     "build": "tsc -p tsconfig.json",
     "verify:step-gate": "node scripts/verify-step-gate.mjs",
     "verify:dag-matrix": "node scripts/verify-dag-matrix.mjs",
+    "verify:graph-recovery": "tsx scripts/verify-graph-recovery.ts",
     "verify:p0": "pnpm build && pnpm verify:step-gate && pnpm verify:dag-matrix"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
+    "flatted": "^3.4.2",
     "ink": "^6.8.0",
     "ink-spinner": "^5.0.0",
     "openai": "^4.86.1",

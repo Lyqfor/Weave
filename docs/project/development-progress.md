@@ -2627,3 +2627,38 @@
 
 #### 下一步
 新增 Web 恢复链路自动化测试，优先覆盖：排队后重连成功、排队后溢出取消、未发送请求不应提前超时。
+
+### 2026-03-22 - Entry 2026-03-22-H - 恢复链路自动化验证脚本（第十阶段）
+
+#### 范围
+将恢复主链路关键逻辑抽离为纯函数并接入自动化验证脚本，降低后续重构引入回归的风险。
+
+#### 改动
+- 抽离可测试恢复工具：
+  - `apps/weave-graph-web/src/lib/recovery-utils.ts`
+  - 提供 `buildRunSubscribePlan`、`enqueueWithLimit`、`flushQueue`、`runWithConcurrency`。
+- 前端主流程接入：
+  - `apps/weave-graph-web/src/App.tsx`
+  - 重连重订阅、离线队列入队、队列刷空逻辑改为复用 `recovery-utils`。
+- 新增验证脚本：
+  - `scripts/verify-graph-recovery.ts`
+  - 覆盖 run 去重游标选择、队列上限淘汰、FIFO flush、并发上限不超限。
+- 命令接入：
+  - `package.json` 新增 `verify:graph-recovery`。
+
+#### 影响文件
+- apps/weave-graph-web/src/lib/recovery-utils.ts
+- apps/weave-graph-web/src/App.tsx
+- scripts/verify-graph-recovery.ts
+- package.json
+
+#### 验证
+- `pnpm verify:graph-recovery` 通过。
+- `pnpm --filter weave-graph-web build` 通过。
+- `get_errors` 对新增/修改文件检查均无错误。
+
+#### 待解决问题
+- 当前验证聚焦纯函数与集成构建；尚缺“真实 WS 断连-重连”浏览器级端到端场景自动化。
+
+#### 下一步
+补充浏览器端恢复 E2E 用例（模拟网关重启与断网抖动），将恢复链路验证从逻辑级提升到交互级。
