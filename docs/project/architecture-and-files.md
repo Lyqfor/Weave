@@ -100,6 +100,7 @@ dagent/
 - `package.json`
   - 定义脚本（`dev`、`build`、`start`、`verify:*`）与依赖。
   - 新增二维图一键脚本入口：`dev:graph:all`、`dev:graph:stop`。
+  - 新增浏览器级恢复链路验证入口：`verify:browser-recovery-e2e`。
 - `tsconfig.json`
   - 定义 TypeScript 编译目标与严格模式配置。
 - `.env.example`
@@ -111,7 +112,7 @@ dagent/
   - 模型配置模板，供复制后按需修改。
   - 同时支持配置文件直写密钥（`apiKey`）和环境变量读取（`apiKeyEnv`）。
 - `config/llm.config.json`
-  - 新增恢复链路一键回归入口：`verify:recovery-all`（逻辑级 + 网关级）。
+  - 新增恢复链路一键回归入口：`verify:recovery-all`（逻辑级 + 网关级 + 浏览器级 E2E）。
   - 应用实际运行时读取的配置文件。
 ### 记忆文件
 - `memories/SOUL.md`
@@ -273,6 +274,8 @@ dagent/
   - RPC Pending 状态机验证脚本：覆盖“未发送不超时、发送后超时、取消语义、成功消费”关键语义。
 - `scripts/verify-ws-recovery-controller.ts`
   - WS 恢复控制器联动验证脚本：覆盖离线入队、队列淘汰取消、重连刷空与重订阅并发上限。
+- `scripts/verify-browser-recovery-e2e.ts`
+  - 浏览器级 E2E 验证脚本：覆盖页面启动、WS 强制断开、离线 RPC 入队、自动重连后补发与响应接收。
 - `src/weave/weave-dag-prompt.md`
   - Weave 历史提示词文档（当前观察者模式不再依赖运行时注入）。
 
@@ -303,6 +306,7 @@ dagent/
   - 新增可插拔命令处理器：`registerRunCommandHandlers(startRun/abortRun/replayRunEvents)`，隔离网关与执行器实现。
   - 新增会话互斥与游标回放能力：`run.subscribe(lastEventId)` 增量补发、`AGENT_BUSY` 快速失败、`run.abort` 占用释放。
   - 回放策略已升级为三级：内存 RingBuffer 命中 -> WAL 重建回放降级 -> 游标失效返回 `RESYNC_REQUIRED`。
+  - 提供 E2E 测试辅助能力：支持断开全部客户端与观测 RPC `reqId`，用于验证断线重连补发链路。
 - `apps/weave-graph-server/src/index.ts`
   - 服务端装配入口：连接 Runtime 事件投影链，并装配 `createRuntimeBridge`（真实 AgentRuntime 优先，失败回退本地桥接）与网关命令处理器。
 - `apps/weave-graph-server/src/runtime/run-registry.ts`

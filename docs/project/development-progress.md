@@ -9,6 +9,31 @@
 
 ## 进度记录
 
+### 2026-03-22 - Entry 069 - 浏览器级恢复链路 E2E 收尾（类型修复 + 真实页面验证通过）
+
+#### 范围
+`scripts/verify-browser-recovery-e2e.ts`、`apps/weave-graph-server/src/gateway/ws-gateway.ts`、`package.json`
+
+#### 改动
+- **`scripts/verify-browser-recovery-e2e.ts`**：
+  - 修复 `waitForFunction` 回调参数隐式 `any`（补全 `Page` 与 `target: string` 类型标注）。
+  - 浏览器断言链路采用稳定观测面：页面状态（已断开/已连接）+ 网关请求观测（`hasObservedRpcRequest(reqId)`）。
+- **`apps/weave-graph-server/src/gateway/ws-gateway.ts`**：
+  - 提供 E2E 可观测辅助能力：记录并查询网关端收到的 RPC `reqId`，用于重连后补发断言。
+- **`package.json`**：
+  - 浏览器级恢复验证命令 `verify:browser-recovery-e2e` 已纳入项目验证入口。
+
+#### 验证
+- 类型检查通过：`scripts/verify-browser-recovery-e2e.ts` 无错误。
+- 浏览器级验证通过：`pnpm verify:browser-recovery-e2e`。
+  - 结果：`Browser recovery E2E verification passed.`
+
+#### 待解决问题
+- 当前浏览器 E2E 仍依赖本地 Chromium 与构建产物，后续可补充 CI 环境缓存与并行策略，降低执行时延。
+
+#### 下一步
+- 将浏览器 E2E 进一步并入统一回归流水（含 CI 任务编排与失败重试策略）。
+
 ### 2026-03-19 - Entry 068 - 调度引擎重构：EngineContext/BaseNode 泛型化 + TurnEngineBusAdapter + 流式旁路
 
 #### 范围

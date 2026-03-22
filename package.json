@@ -15,7 +15,8 @@
     "verify:graph-recovery": "tsx scripts/verify-graph-recovery.ts",
     "verify:rpc-pending": "tsx scripts/verify-rpc-pending.ts",
     "verify:ws-recovery-controller": "tsx scripts/verify-ws-recovery-controller.ts",
-    "verify:recovery-all": "pnpm verify:graph-recovery && pnpm verify:rpc-pending && pnpm verify:ws-recovery-controller && pnpm --filter weave-graph-server verify:gateway-rpc && pnpm --filter weave-graph-server verify:gateway-reconnect",
+    "verify:browser-recovery-e2e": "pnpm --filter weave-graph-web build && tsx scripts/verify-browser-recovery-e2e.ts",
+    "verify:recovery-all": "pnpm verify:graph-recovery && pnpm verify:rpc-pending && pnpm verify:ws-recovery-controller && pnpm --filter weave-graph-server verify:gateway-rpc && pnpm --filter weave-graph-server verify:gateway-reconnect && pnpm verify:browser-recovery-e2e",
     "verify:gateway-reconnect": "pnpm --filter weave-graph-server verify:gateway-reconnect",
     "verify:p0": "pnpm build && pnpm verify:step-gate && pnpm verify:dag-matrix"
   },
@@ -31,6 +32,7 @@
   "devDependencies": {
     "@types/node": "^22.10.5",
     "@types/react": "^19.2.14",
+    "playwright": "^1.54.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }
