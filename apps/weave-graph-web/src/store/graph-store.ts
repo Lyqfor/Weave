@@ -46,6 +46,7 @@ interface GraphState {
   applyActiveNodeChanges: (changes: NodeChange[]) => void;
   clearPendingApproval: () => void;
   resetRunForResync: (runId: string) => void;
+  createDraftRun: (dagId: string, runId: string, userInputSummary: string, sessionId?: string) => void;
   sendRpc: <T = unknown>(type: string, payload: unknown) => Promise<T>;
 }
 
@@ -138,7 +139,66 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     return next;
   },
+  createDraftRun(dagId, runId, userInputSummary, sessionId) {
+    const now = new Date().toISOString();
+    set((state) => {
+      // 开屏提交后先创建草稿 run，保证三栏布局立即有可绑定会话。
+      const existing = state.dags[dagId];
+      const next: DagGraph = existing
+        ? {
+            ...existing,
+            runId,
+            sessionId: sessionId ?? existing.sessionId,
+            userInputSummary,
+            updatedAt: now
+          }
+        : {
+            dagId,
+            runId,
+            sessionId,
+            userInputSummary,
+            nodes: [],
+            edges: [],
+            latestSeq: 0,
+            seenEventIds: {},
+            lockedNodeIds: [],
+            updatedAt: now
+          };
+
+      return {
+        dags: { ...state.dags, [dagId]: next },
+        dagOrder: state.dagOrder.includes(dagId) ? state.dagOrder : [dagId, ...state.dagOrder],
+        activeDagId: dagId
+      };
+    });
+  },
   applyEnvelope(evt) {
+    if (evt.eventType === "run.start" && evt.dagId !== evt.runId) {
+      // 当后端将 dagId 归一化后，把前端草稿 runId 键迁移到正式 dagId，避免出现双会话分裂。
+      const currentState = get();
+      const draft = currentState.dags[evt.runId];
+      const target = currentState.dags[evt.dagId];
+      if (draft && !target) {
+        set((state) => {
+          const nextDags = { ...state.dags };
+          const draftDag = nextDags[evt.runId];
+          if (!draftDag || nextDags[evt.dagId]) {
+            return state;
+          }
+
+          nextDags[evt.dagId] = { ...draftDag, dagId: evt.dagId };
+          delete nextDags[evt.runId];
+
+          const nextOrder = state.dagOrder.map((id) => (id === evt.runId ? evt.dagId : id));
+          return {
+            dags: nextDags,
+            dagOrder: nextOrder,
+            activeDagId: state.activeDagId === evt.runId ? evt.dagId : state.activeDagId
+          };
+        });
+      }
+    }
+
     const current = get().dags[evt.dagId] ?? get().ensureDag(evt.dagId, evt.runId, evt.timestamp);
     if (evt.eventId && current.seenEventIds[evt.eventId]) {
       return;

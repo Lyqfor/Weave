@@ -9,6 +9,44 @@
 
 ## 进度记录
 
+### 2026-03-22 - Entry 070 - 开屏提交后空背景修复（前后端时序解耦 + 草稿会话承接）
+
+#### 范围
+`apps/weave-graph-server/src/gateway/ws-gateway.ts`、`apps/weave-graph-web/src/store/graph-store.ts`、`apps/weave-graph-web/src/App.tsx`
+
+#### 改动
+- **`apps/weave-graph-server/src/gateway/ws-gateway.ts`**：
+  - WebSocket 消息处理拆分为两段：先处理 JSON 解析错误，再处理 RPC 业务逻辑异常。
+  - 对 RPC 业务异常统一回 `server.response(ok=false)`（携带原 reqId），避免前端请求悬挂导致界面卡在无状态背景。
+- **`apps/weave-graph-web/src/store/graph-store.ts`**：
+  - 新增 `createDraftRun`，在 `start.run` 成功后立即创建草稿会话。
+  - 新增 `run.start` 的 `runId -> dagId` 键迁移逻辑，吸收后端归一化 dagId，避免会话分裂。
+- **`apps/weave-graph-web/src/App.tsx`**：
+  - `handleSummonStart` 调整为：`start.run` 返回即 `createDraftRun + setIsWeavingStarted(true)`。
+  - `run.subscribe` 改后台执行，不再阻塞布局切换。
+
+#### 验证
+- 类型/问题检查通过：
+  - `apps/weave-graph-server/src/gateway/ws-gateway.ts`
+  - `apps/weave-graph-web/src/store/graph-store.ts`
+  - `apps/weave-graph-web/src/App.tsx`
+- 构建通过：
+  - `pnpm --filter weave-graph-server build`
+  - `pnpm --filter weave-graph-web build`
+- 恢复回归通过：`pnpm verify:recovery-all`
+  - `Graph recovery verification passed.`
+  - `RPC pending verification passed.`
+  - `WS recovery controller verification passed.`
+  - `Gateway RPC verification passed.`
+  - `Gateway reconnect verification passed.`
+  - `Browser recovery E2E verification passed.`
+
+#### 待解决问题
+- `weave-graph-web` 产物仍存在大 chunk 警告（>500kB），与本次流程修复无关，可后续做按需分片优化。
+
+#### 下一步
+- 为“开屏提交 -> 草稿会话 -> run.start 归一化迁移”补充前端单测，降低后续时序回归风险。
+
 ### 2026-03-22 - Entry 069 - 浏览器级恢复链路 E2E 收尾（类型修复 + 真实页面验证通过）
 
 #### 范围

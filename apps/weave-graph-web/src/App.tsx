@@ -173,6 +173,7 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
   const applyActiveNodeChanges = useGraphStore((s) => s.applyActiveNodeChanges);
   const applyEnvelope = useGraphStore((s) => s.applyEnvelope);
   const sendRpc = useGraphStore((s) => s.sendRpc);
+  const createDraftRun = useGraphStore((s) => s.createDraftRun);
   const pendingApprovalNodeId = useGraphStore((s) => s.pendingApprovalNodeId);
 
   const { fitView } = useReactFlow();
@@ -534,11 +535,16 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
 
     try {
       const runInfo = await sendRpc<StartRunResponsePayload>("start.run", payload);
+      createDraftRun(runInfo.runId, runInfo.runId, text, runInfo.sessionId);
+      setIsWeavingStarted(true);
+
       const subscribePayload: RunSubscribePayload = {
         runId: runInfo.runId
       };
-      await sendRpc<RunSubscribeResponsePayload>("run.subscribe", subscribePayload);
-      setIsWeavingStarted(true);
+      // 订阅改为后台执行，避免订阅阶段阻塞布局切换。
+      void sendRpc<RunSubscribeResponsePayload>("run.subscribe", subscribePayload).catch((err) => {
+        console.warn("run.subscribe failed after start.run accepted", err);
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("AGENT_BUSY")) {
@@ -546,7 +552,7 @@ function GraphCanvas({ isWeavingStarted, setIsWeavingStarted }: { isWeavingStart
       }
       throw new Error(message);
     }
-  }, [sendRpc, setIsWeavingStarted]);
+  }, [createDraftRun, sendRpc, setIsWeavingStarted]);
 
   return (
     <div
