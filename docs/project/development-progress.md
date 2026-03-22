@@ -9,6 +9,33 @@
 
 ## 进度记录
 
+### 2026-03-22 - Entry 075 - 修复图模式仍报 Missing API key（dist 优先加载导致旧逻辑生效）
+
+#### 范围
+`apps/weave-graph-server/src/runtime/runtime-bridge.ts`
+
+#### 改动
+- 修复动态模块加载优先级：从“优先 dist”改为“优先 src，失败再回退 dist”。
+  - 解决开发模式下 `tsx` 运行仍加载过期 `dist` 模块，导致最新 API key 修复未生效的问题。
+- 修复 `runtime-bridge.ts` 的类型与字段缺失：
+  - 增加 `walDao` 字段声明。
+  - `createWalDao` 明确返回 `WalDaoLike`。
+  - `loadRunEvents` 改为传入 `repoRoot` 创建 DAO。
+  - 显式标注 `record` 类型，消除隐式 `any`。
+
+#### 验证
+- `pnpm --filter weave-graph-server build` 通过。
+- `pnpm --filter weave-graph-server verify:gateway-rpc` 通过。
+- 重启图模式服务通过：
+  - `pnpm dev:graph:stop`
+  - `pnpm dev:graph:all`
+
+#### 待解决问题
+- 前端大 chunk 告警仍存在（与本次修复无关）。
+
+#### 下一步
+- 增加 runtime-bridge 的模块加载策略单测，防止后续再次出现“改 src 不生效”的回归。
+
 ### 2026-03-22 - Entry 074 - 修复 graph-server 子目录启动时 Missing API key
 
 #### 范围
