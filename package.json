@@ -10,7 +10,7 @@
     "dev:graph:logs": "powershell -ExecutionPolicy Bypass -Command \"Set-Location apps/weave-graph-server; if(Test-Path .run.log){Get-Content .run.log -Wait -Tail 80}else{Write-Host '.run.log not found, run dev:graph:all first'}\"",
     "start": "node --enable-source-maps dist/presentation/index.js",
     "build": "tsc -p tsconfig.json",
-    "lint": "eslint src --ext .ts --max-warnings 50",
+    "lint": "eslint src --ext .ts --max-warnings 0",
     "lint:fix": "eslint src --ext .ts --fix",
     "format": "prettier --write \"src/**/*.ts\" \"*.{json,yaml,yml,cjs,mjs}\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"*.{json,yaml,yml,cjs,mjs}\"",

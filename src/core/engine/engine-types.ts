@@ -23,8 +23,8 @@ export interface EngineContext {
   dag: DagExecutionGraph;
   abortSignal: AbortSignal;
   abortController: AbortController;
-  /** Map<nodeId, BaseNode<any>> — 避免与 base-node 循环导入，使用 any */
-  nodeRegistry: Map<string, any>;
+  /** Map<nodeId, BaseNode<EngineContext>> — 执行中的节点注册表 */
+  nodeRegistry: Map<string, { execute(ctx: EngineContext): Promise<void> }>;
   stateStore: DagStateStore;
   snapshotStore?: ISnapshotStore;
   logger: ILogger;

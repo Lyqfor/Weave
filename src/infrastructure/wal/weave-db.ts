@@ -1,6 +1,6 @@
-import { DatabaseSync } from 'node:sqlite';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
+import { DatabaseSync } from "node:sqlite";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 const SCHEMA_SQL = `
 -- 1. Session 表：宏观对话生命周期
@@ -65,11 +65,11 @@ export class WeaveDb {
     }
 
     this.db = new DatabaseSync(dbPath);
-    
+
     // 👑 顶级架构配置：开启 SQLite 原生 WAL 模式，确保并发读写性能
-    this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('PRAGMA synchronous = NORMAL');
-    
+    this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA synchronous = NORMAL");
+
     this.initSchema();
   }
 
@@ -98,14 +98,14 @@ export class WeaveDb {
   /**
    * 开启同步事务（手动控制）。
    */
-  transaction<T>(fn: (...args: any[]) => T): T {
-    this.db.exec('BEGIN TRANSACTION');
+  transaction<T>(fn: () => T): T {
+    this.db.exec("BEGIN TRANSACTION");
     try {
       const result = fn();
-      this.db.exec('COMMIT');
+      this.db.exec("COMMIT");
       return result;
     } catch (err) {
-      this.db.exec('ROLLBACK');
+      this.db.exec("ROLLBACK");
       throw err;
     }
   }

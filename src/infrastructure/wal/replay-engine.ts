@@ -1,16 +1,16 @@
-import { WalDao } from './wal-dao.js';
-import { DagExecutionGraph, type DagNodeStatus } from '../../core/engine/dag-graph.js';
-import { DagStateStore } from '../../core/engine/state-store.js';
-import { parse } from 'flatted';
+import { WalDao } from "./wal-dao.js";
+import { DagExecutionGraph, type DagNodeStatus } from "../../core/engine/dag-graph.js";
+import { DagStateStore, type DagNodeOutputRecord } from "../../core/engine/state-store.js";
+import { parse } from "flatted";
 
 /**
  * 状态快照 DTO，用于向前端传输轻量化的图状态。
  */
 export interface DagSnapshotDTO {
-  nodes: Array<{ id: string; type: string; status: string; payload?: any }>;
+  nodes: Array<{ id: string; type: string; status: string; payload?: Record<string, unknown> }>;
   edges: Array<{ source: string; target: string; kind: string }>;
   dataEdges: Array<{ fromNodeId: string; toNodeId: string; toKey: string; fromKey?: string }>;
-  globalContext: Record<string, any>;
+  globalContext: Record<string, unknown>;
 }
 
 /**
@@ -34,15 +34,15 @@ export class DagReplayEngine {
   ): Promise<{ dag: DagExecutionGraph; stateStore: DagStateStore }> {
     // 1. 获取血缘关联的祖先日志（排除并行无关分支的干扰）
     const events = this.dao.getAncestorsWalEvents(parentExecId, forkAtNodeId);
-    
+
     // 2. 内存状态机重构（静默模式，不挂载 EventBus）
     const dag = new DagExecutionGraph();
     const stateStore = new DagStateStore();
 
     // 3. 按序重放（Replay）
     for (const record of events) {
-      const payload = parse(record.payload);
-      
+      const payload = parse(record.payload) as Record<string, unknown>;
+
       // 还原大文本引用（从黑板拉回数据）
       const dehydratedPayload = await this.rehydratePayload(payload);
 
@@ -58,7 +58,7 @@ export class DagReplayEngine {
         session_id: parentExec.session_id,
         parent_execution_id: parentExecId,
         forked_at_node: forkAtNodeId,
-        status: 'RUNNING'
+        status: "RUNNING",
       });
       // 更新 Session 的 Head 指针到新分支
       this.dao.updateSessionHead(parentExec.session_id, newExecId);
@@ -70,9 +70,11 @@ export class DagReplayEngine {
   /**
    * 无损还原某个完整的历史执行流（只读重构，供前端查询或 UI 渲染）。
    */
-  public async reconstruct(executionId: string): Promise<{ dag: DagExecutionGraph; stateStore: DagStateStore }> {
+  public async reconstruct(
+    executionId: string
+  ): Promise<{ dag: DagExecutionGraph; stateStore: DagStateStore }> {
     const events = this.dao.getExecutionWalEvents(executionId);
-    
+
     const dag = new DagExecutionGraph();
     const stateStore = new DagStateStore();
 
@@ -89,50 +91,55 @@ export class DagReplayEngine {
    * 将内存中的图和状态序列化为轻量级 DTO。
    * 注意：本方法仅序列化内存中的状态，Edges 建议通过获取 WAL 事件中的 topology 信息或直接查表获取。
    */
-  public toSnapshotDTO(dag: DagExecutionGraph, stateStore: DagStateStore, executionId: string): DagSnapshotDTO {
+  public toSnapshotDTO(
+    dag: DagExecutionGraph,
+    stateStore: DagStateStore,
+    executionId: string
+  ): DagSnapshotDTO {
     const nodes = dag.getNodeIds().map((id: string) => {
       const node = dag.getNode(id);
       return {
         id: node.id,
         type: node.type,
         status: node.status,
-        payload: node.payload
+        payload: node.payload as Record<string, unknown> | undefined,
       };
     });
 
-    const dataEdges: DagSnapshotDTO['dataEdges'] = [];
+    const dataEdges: DagSnapshotDTO["dataEdges"] = [];
     for (const id of dag.getNodeIds()) {
       dataEdges.push(...dag.getDataEdgesTo(id));
     }
 
     // 从数据库中拉取拓扑边，因为内存 DagGraph 未暴露 outgoing 遍历接口
-    const dbEdges = (this.dao as any).db.prepare('SELECT source_node_id as source, target_node_id as target, kind FROM dag_edge WHERE execution_id = ?')
-      .all(executionId) as any[];
+    const dbEdges = this.dao.getEdges(executionId);
 
     return {
       nodes,
       edges: dbEdges,
       dataEdges,
-      globalContext: stateStore.snapshot().runContext
+      globalContext: stateStore.snapshot().runContext as Record<string, unknown>,
     };
   }
 
   /**
    * 递归还原 Payload 中的黑板大文本引用。
    */
-  private async rehydratePayload(payload: any): Promise<any> {
-    if (!payload || typeof payload !== 'object') return payload;
+  private async rehydratePayload(
+    payload: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    if (!payload || typeof payload !== "object") return payload;
 
     for (const key in payload) {
       const val = payload[key];
-      if (typeof val === 'string' && val.startsWith('[[REF:bb_')) {
-        const bbId = val.replace('[[REF:', '').replace(']]', '');
+      if (typeof val === "string" && val.startsWith("[[REF:bb_")) {
+        const bbId = val.replace("[[REF:", "").replace("]]", "");
         const msg = this.dao.getBlackboardMessage(bbId);
         if (msg) {
           payload[key] = msg.content;
         }
-      } else if (typeof val === 'object' && val !== null) {
-        await this.rehydratePayload(val);
+      } else if (typeof val === "object" && val !== null) {
+        await this.rehydratePayload(val as Record<string, unknown>);
       }
     }
     return payload;
@@ -145,53 +152,72 @@ export class DagReplayEngine {
     dag: DagExecutionGraph,
     stateStore: DagStateStore,
     type: string,
-    p: any
+    p: Record<string, unknown>
   ): void {
     switch (type) {
-      case 'engine.node.created':
-        dag.addNode({ id: p.nodeId, type: p.nodeType, status: p.payload?.status || 'pending' }, p.payload);
+      case "engine.node.created": {
+        const nodeId = p.nodeId as string;
+        const nodeType = p.nodeType as string;
+        const frozenPayload = p.payload as Record<string, unknown> | undefined;
+        const initStatus = (frozenPayload?.status as string | undefined) ?? "pending";
+        dag.addNode(
+          {
+            id: nodeId,
+            type: nodeType as import("../../core/engine/dag-graph.js").DagNodeType,
+            status: initStatus as DagNodeStatus,
+          },
+          frozenPayload
+        );
         break;
-      case 'engine.edge.created':
+      }
+      case "engine.edge.created":
         // 防御性：只有当两个节点都已在重构的图中存在时才添加边
         try {
-          if (dag.getNodeIds().includes(p.fromId) && dag.getNodeIds().includes(p.toId)) {
-            dag.addEdge(p.fromId, p.toId, p.kind);
+          const from = p.fromId as string;
+          const to = p.toId as string;
+          const kind = p.kind as "dependency" | "data" | "retry" | undefined;
+          if (dag.getNodeIds().includes(from) && dag.getNodeIds().includes(to)) {
+            dag.addEdge(from, to, kind);
           }
         } catch {
           // 忽略非法边
         }
         break;
-      case 'engine.data.edge.created':
+      case "engine.data.edge.created":
         try {
-          if (dag.getNodeIds().includes(p.fromNodeId) && dag.getNodeIds().includes(p.toNodeId)) {
-            dag.addDataEdge(p);
+          const fromNodeId = p.fromNodeId as string;
+          const toNodeId = p.toNodeId as string;
+          if (dag.getNodeIds().includes(fromNodeId) && dag.getNodeIds().includes(toNodeId)) {
+            dag.addDataEdge(p as unknown as import("../../core/engine/dag-graph.js").DagDataEdge);
           }
         } catch {
           // 忽略非法数据边
         }
         break;
-      case 'engine.node.transition':
+      case "engine.node.transition":
         // 直接操作内存节点，避免触发 transitionStatus 的状态机校验和二次广播
         try {
-          const node = dag.getNode(p.nodeId);
+          const nodeId = p.nodeId as string;
+          const node = dag.getNode(nodeId);
           if (node) {
             node.status = p.toStatus as DagNodeStatus;
-            if (p.updatedPayload) {
-               // 恢复 StateStore 中的输出
-               if (p.updatedPayload.output) {
-                 stateStore.setNodeOutput(p.nodeId, p.updatedPayload.output);
-               }
-               // 恢复节点内部快照数据
-               node.payload = { ...(node.payload || {}), ...p.updatedPayload };
+            const updated = p.updatedPayload as Record<string, unknown> | undefined;
+            if (updated) {
+              // 恢复 StateStore 中的输出
+              if (updated.output) {
+                stateStore.setNodeOutput(nodeId, updated.output as DagNodeOutputRecord);
+              }
+              // 恢复节点内部快照数据
+              node.payload = { ...(node.payload ?? {}), ...updated };
             }
           }
         } catch {
           // 容错：如果节点在重放流中由于某种原因不存在，忽略该迁移事件
         }
         break;
-      case 'run.start':
+      case "run.start":
         if (p.userInput) {
-          stateStore.setRunValue('userInput', p.userInput);
+          stateStore.setRunValue("userInput", p.userInput as string);
         }
         break;
     }

@@ -5,7 +5,15 @@
  */
 
 import type { WeaveEventBus } from "../../domain/event/event-bus.js";
-import type { AgentLoopPlugin } from "./plugins/agent-plugin.js";
+import type {
+  AgentLoopPlugin,
+  AgentPluginOutput,
+  AgentPluginOutputs,
+} from "./plugins/agent-plugin.js";
+import type { AgentRunEvent } from "../../domain/event/event-types.js";
+
+/** engine.node.transition 事件 payload 的类型 */
+type NodeTransitionPayload = Extract<AgentRunEvent, { type: "engine.node.transition" }>["payload"];
 
 export class PluginManager {
   constructor(
@@ -16,10 +24,11 @@ export class PluginManager {
   }
 
   private listenToEngineEvents(): void {
-    // 👑 核心魔法：从物理总线中“窃听”状态变迁，触发旁路插件
+    // 👑 核心魔法：从物理总线中"窃听"状态变迁，触发旁路插件
     this.bus.on("engine.node.transition", (event) => {
-      const payload = event.payload as any;
-      const { nodeId, nodeType, toStatus, updatedPayload } = payload;
+      const { nodeId, nodeType, toStatus, updatedPayload } = (
+        event as AgentRunEvent & { payload: NodeTransitionPayload }
+      ).payload;
 
       // 工具节点生命周期
       if (nodeType === "tool") {
@@ -46,12 +55,19 @@ export class PluginManager {
     });
   }
 
-  private async executePlugins(hookName: string, context: any): Promise<void> {
+  private async executePlugins(
+    hookName: keyof AgentLoopPlugin,
+    context: Record<string, unknown>
+  ): Promise<void> {
     for (const plugin of this.plugins) {
       try {
-        const hook = (plugin as any)[hookName];
+        const hook = plugin[hookName] as
+          | ((
+              ctx: Record<string, unknown>
+            ) => Promise<AgentPluginOutput | AgentPluginOutputs | void>)
+          | undefined;
         if (typeof hook === "function") {
-          const output = await hook(context);
+          const output = await hook.call(plugin, context);
           // 👑 插件的输出由管家统一发回总线，节点根本不知道！
           if (output) {
             this.bus.dispatchPluginOutput(output);

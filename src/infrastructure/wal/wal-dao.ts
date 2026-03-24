@@ -1,11 +1,18 @@
-import type { DatabaseSync } from 'node:sqlite';
-import { WeaveDb } from './weave-db.js';
+import type { DatabaseSync } from "node:sqlite";
+import { WeaveDb } from "./weave-db.js";
 import type {
   IWalDao,
   SessionRecord,
   ExecutionRecord,
-  WalEventRecord
-} from '../../application/ports/wal-dao.js';
+  WalEventRecord,
+} from "../../contracts/storage.js";
+
+/** 拓扑边记录（仅用于 replay-engine 读取） */
+export interface EdgeRecord {
+  source: string;
+  target: string;
+  kind: string;
+}
 
 export class WalDao implements IWalDao {
   private readonly db: DatabaseSync;
@@ -28,23 +35,27 @@ export class WalDao implements IWalDao {
   }
 
   getSession(id: string): SessionRecord | undefined {
-    return this.db.prepare('SELECT * FROM session WHERE id = ?').get(id) as any;
+    return this.db.prepare("SELECT * FROM session WHERE id = ?").get(id) as
+      | SessionRecord
+      | undefined;
   }
 
   updateSessionHead(sessionId: string, headExecutionId: string): void {
-    this.db.prepare('UPDATE session SET head_execution_id = ? WHERE id = ?').run(headExecutionId, sessionId);
+    this.db
+      .prepare("UPDATE session SET head_execution_id = ? WHERE id = ?")
+      .run(headExecutionId, sessionId);
   }
 
   getSessions(cursor?: string, limit: number = 20): SessionRecord[] {
-    let sql = 'SELECT * FROM session';
-    const params: any[] = [];
+    let sql = "SELECT * FROM session";
+    const params: (string | number | null)[] = [];
     if (cursor) {
-      sql += ' WHERE created_at < ?';
+      sql += " WHERE created_at < ?";
       params.push(cursor);
     }
-    sql += ' ORDER BY created_at DESC LIMIT ?';
+    sql += " ORDER BY created_at DESC LIMIT ?";
     params.push(limit);
-    return this.db.prepare(sql).all(...params) as any;
+    return this.db.prepare(sql).all(...params) as SessionRecord[];
   }
 
   // ─── Execution ───────────────────────────────────────────────────────────
@@ -63,24 +74,26 @@ export class WalDao implements IWalDao {
     );
   }
 
-  updateExecutionStatus(id: string, status: ExecutionRecord['status']): void {
-    this.db.prepare('UPDATE dag_execution SET status = ? WHERE id = ?').run(status, id);
+  updateExecutionStatus(id: string, status: ExecutionRecord["status"]): void {
+    this.db.prepare("UPDATE dag_execution SET status = ? WHERE id = ?").run(status, id);
   }
 
   getExecution(id: string): ExecutionRecord | undefined {
-    return this.db.prepare('SELECT * FROM dag_execution WHERE id = ?').get(id) as any;
+    return this.db.prepare("SELECT * FROM dag_execution WHERE id = ?").get(id) as
+      | ExecutionRecord
+      | undefined;
   }
 
   getSessionExecutions(sessionId: string, cursor?: string, limit: number = 50): ExecutionRecord[] {
-    let sql = 'SELECT * FROM dag_execution WHERE session_id = ?';
-    const params: any[] = [sessionId];
+    let sql = "SELECT * FROM dag_execution WHERE session_id = ?";
+    const params: (string | number | null)[] = [sessionId];
     if (cursor) {
-      sql += ' AND created_at < ?';
+      sql += " AND created_at < ?";
       params.push(cursor);
     }
-    sql += ' ORDER BY created_at DESC LIMIT ?';
+    sql += " ORDER BY created_at DESC LIMIT ?";
     params.push(limit);
-    return this.db.prepare(sql).all(...params) as any;
+    return this.db.prepare(sql).all(...params) as ExecutionRecord[];
   }
 
   // ─── Edges ───────────────────────────────────────────────────────────────
@@ -104,7 +117,9 @@ export class WalDao implements IWalDao {
   }
 
   getBlackboardMessage(id: string): { content: string; role: string } | undefined {
-    return this.db.prepare('SELECT content, role FROM blackboard_message WHERE id = ?').get(id) as any;
+    return this.db.prepare("SELECT content, role FROM blackboard_message WHERE id = ?").get(id) as
+      | { content: string; role: string }
+      | undefined;
   }
 
   // ─── WAL Events ──────────────────────────────────────────────────────────
@@ -114,12 +129,7 @@ export class WalDao implements IWalDao {
       INSERT INTO wal_event (execution_id, node_id, event_type, payload)
       VALUES (?, ?, ?, ?)
     `);
-    stmt.run(
-      event.execution_id,
-      event.node_id ?? null,
-      event.event_type,
-      event.payload
-    );
+    stmt.run(event.execution_id, event.node_id ?? null, event.event_type, event.payload);
   }
 
   /**
@@ -141,10 +151,22 @@ export class WalDao implements IWalDao {
       AND (node_id IN (SELECT node_id FROM Ancestors) OR node_id = ? OR node_id IS NULL)
       ORDER BY id ASC
     `;
-    return this.db.prepare(sql).all(targetNodeId, execId, execId, execId, targetNodeId) as any;
+    return this.db
+      .prepare(sql)
+      .all(targetNodeId, execId, execId, execId, targetNodeId) as WalEventRecord[];
   }
 
   getExecutionWalEvents(execId: string): WalEventRecord[] {
-    return this.db.prepare('SELECT * FROM wal_event WHERE execution_id = ? ORDER BY id ASC').all(execId) as any;
+    return this.db
+      .prepare("SELECT * FROM wal_event WHERE execution_id = ? ORDER BY id ASC")
+      .all(execId) as WalEventRecord[];
+  }
+
+  getEdges(executionId: string): EdgeRecord[] {
+    return this.db
+      .prepare(
+        "SELECT source_node_id as source, target_node_id as target, kind FROM dag_edge WHERE execution_id = ?"
+      )
+      .all(executionId) as unknown as EdgeRecord[];
   }
 }

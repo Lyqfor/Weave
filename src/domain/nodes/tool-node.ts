@@ -251,8 +251,8 @@ export class ToolNode extends BaseNode<IAgentNodeContext> {
         retryNode.broadcastIo(ctx);
         prevNodeId = retryNode.id;
       }
-    } catch (error: any) {
-      executionError = error;
+    } catch (error: unknown) {
+      executionError = error as Error;
       throw error;
     } finally {
       // 写入 workingMessages + stateStore

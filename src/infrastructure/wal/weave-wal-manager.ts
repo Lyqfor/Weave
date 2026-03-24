@@ -64,7 +64,7 @@ export class WeaveWalManager {
     if (!p) return event;
 
     // 👑 升级为递归扫描模式，不再局限于特定字段名
-    this.recursiveDehydrate(p, event.runId);
+    this.recursiveDehydrate(p as Record<string, unknown>, event.runId);
 
     return event;
   }
@@ -72,7 +72,7 @@ export class WeaveWalManager {
   /**
    * 递归脱水：发现长文本 -> 写入黑板 -> 替换为引用
    */
-  private recursiveDehydrate(obj: any, runId: string): void {
+  private recursiveDehydrate(obj: Record<string, unknown>, runId: string): void {
     if (!obj || typeof obj !== "object") return;
 
     for (const key in obj) {
@@ -93,7 +93,7 @@ export class WeaveWalManager {
         // 替换为引用指针
         obj[key] = `[[REF:${blackboardId}]]`;
       } else if (typeof val === "object" && val !== null) {
-        this.recursiveDehydrate(val, runId);
+        this.recursiveDehydrate(val as Record<string, unknown>, runId);
       }
     }
   }
@@ -110,7 +110,7 @@ export class WeaveWalManager {
     try {
       for (const e of events) {
         // 🛡️ 类型安全地提取 nodeId
-        const payload = e.payload as any;
+        const payload = e.payload as Record<string, unknown> | undefined;
         const nodeId =
           payload && typeof payload === "object" && "nodeId" in payload
             ? String(payload.nodeId)

@@ -8,25 +8,16 @@ import type { IBlobStore } from "../../core/ports/blob-store.js";
 import type { IWalDao } from "../ports/wal-dao.js";
 import { DagExecutionGraph } from "../../core/engine/dag-graph.js";
 import { DagStateStore } from "../../core/engine/state-store.js";
-import type {
-  RunOnceStreamOptions
-} from "../../core/engine/runner-types.js";
+import type { RunOnceStreamOptions } from "../../core/engine/runner-types.js";
 import type OpenAI from "openai";
-import type {
-  AgentLoopPlugin,
-  AgentPluginRunContext
-} from "./plugins/agent-plugin.js";
+import type { AgentLoopPlugin, AgentPluginRunContext } from "./plugins/agent-plugin.js";
 import { extractErrorMessage } from "../../core/errors/agent-errors.js";
 import {
   MAX_AGENT_STEPS,
   getDefaultToolRetries,
-  getDefaultToolTimeoutMs
+  getDefaultToolTimeoutMs,
 } from "../../core/config/defaults.js";
-import {
-  executeOnRunStart,
-  executeOnRunCompleted,
-  executeOnRunError
-} from "./plugin-executor.js";
+import { executeOnRunStart, executeOnRunCompleted, executeOnRunError } from "./plugin-executor.js";
 import { executeDag } from "../../core/engine/dag-executor.js";
 import { LlmNode } from "../../domain/nodes/llm-node.js";
 import { InputNode } from "../../domain/nodes/input-node.js";
@@ -41,8 +32,8 @@ import { WeaveWalManager } from "../../infrastructure/wal/weave-wal-manager.js";
 import type { IPauseSignal } from "../../core/engine/engine-types.js";
 import type { InterceptDecision } from "../weave/interceptor.js";
 
-/** 
- * 暂停控制器：实现引擎层的 IPauseSignal 协议 
+/**
+ * 暂停控制器：实现引擎层的 IPauseSignal 协议
  */
 class PauseController implements IPauseSignal {
   private _paused = false;
@@ -52,13 +43,17 @@ class PauseController implements IPauseSignal {
   async wait(): Promise<void> {
     if (this._paused) {
       if (!this._promise) {
-        this._promise = new Promise<void>((res) => { this._resolve = res; });
+        this._promise = new Promise<void>((res) => {
+          this._resolve = res;
+        });
       }
       return this._promise;
     }
   }
 
-  pause(): void { this._paused = true; }
+  pause(): void {
+    this._paused = true;
+  }
   resume(): void {
     if (!this._paused) return;
     this._paused = false;
@@ -68,7 +63,9 @@ class PauseController implements IPauseSignal {
       this._promise = null;
     }
   }
-  isPaused(): boolean { return this._paused; }
+  isPaused(): boolean {
+    return this._paused;
+  }
 }
 
 // 从 event-types 重新导出，保持向后兼容
@@ -86,7 +83,7 @@ export class AgentRuntime extends EventEmitter {
     debug: () => {},
     info: () => {},
     warn: () => {},
-    error: () => {}
+    error: () => {},
   };
 
   private static readonly NOOP_WAL_DAO: IWalDao = {
@@ -103,7 +100,7 @@ export class AgentRuntime extends EventEmitter {
     getBlackboardMessage: () => undefined,
     insertWalEvent: () => {},
     getAncestorsWalEvents: () => [],
-    getExecutionWalEvents: () => []
+    getExecutionWalEvents: () => [],
   };
 
   private static readonly NOOP_LLM_CLIENT: ILlmClient = {
@@ -115,12 +112,13 @@ export class AgentRuntime extends EventEmitter {
     },
     async chatWithTools() {
       throw new Error("LLM client not configured");
-    }
+    },
   };
 
   private sessionId = "";
   private turnIndex = 0;
-  private readonly historyMessages: import("../../application/ports/llm-client.js").ChatHistoryMessage[] = [];
+  private readonly historyMessages: import("../../application/ports/llm-client.js").ChatHistoryMessage[] =
+    [];
 
   private readonly llmClient: ILlmClient;
   private readonly memoryStore: IMemoryStore;
@@ -149,18 +147,20 @@ export class AgentRuntime extends EventEmitter {
     if (this.isMemoryStore(llmClientOrMemoryStore)) {
       this.llmClient = AgentRuntime.NOOP_LLM_CLIENT;
       this.memoryStore = llmClientOrMemoryStore;
-      this.toolRegistry = (memoryStoreOrToolRegistry as IToolRegistry) ?? ({
-        register: () => {},
-        resolve: () => undefined,
-        listModelTools: () => [],
-        execute: async () => ({ ok: false, content: "Tool registry not configured" })
-      } satisfies IToolRegistry);
+      this.toolRegistry =
+        (memoryStoreOrToolRegistry as IToolRegistry) ??
+        ({
+          register: () => {},
+          resolve: () => undefined,
+          listModelTools: () => [],
+          execute: async () => ({ ok: false, content: "Tool registry not configured" }),
+        } satisfies IToolRegistry);
       this.walDao = AgentRuntime.NOOP_WAL_DAO;
       this.logger = AgentRuntime.NOOP_LOGGER;
       this.blobStore = undefined;
     } else {
       this.llmClient = llmClientOrMemoryStore;
-      this.memoryStore = (memoryStoreOrToolRegistry as IMemoryStore);
+      this.memoryStore = memoryStoreOrToolRegistry as IMemoryStore;
       this.toolRegistry = toolRegistryOrUndefined as IToolRegistry;
       this.walDao = walDao ?? AgentRuntime.NOOP_WAL_DAO;
       this.logger = logger ?? AgentRuntime.NOOP_LOGGER;
@@ -169,7 +169,7 @@ export class AgentRuntime extends EventEmitter {
 
     this.logger.info("runtime.init", "AgentRuntime 初始化完成 (DIP 已就绪)", {
       provider: this.llmConfig.provider,
-      model: this.llmConfig.model
+      model: this.llmConfig.model,
     });
   }
 
@@ -186,29 +186,26 @@ export class AgentRuntime extends EventEmitter {
 
   async runOnce(userInput: string): Promise<string> {
     this.logger.info("run.once.start", "开始执行非流式调用", {
-      userInputLength: userInput.length
+      userInputLength: userInput.length,
     });
 
     const composedSystemPrompt = this.memoryStore.buildSystemPrompt(this.llmConfig.systemPrompt);
     const finalText = await this.llmClient.chat({
       userMessage: userInput,
       systemPrompt: composedSystemPrompt,
-      historyMessages: this.historyMessages
+      historyMessages: this.historyMessages,
     });
 
     this.historyMessages.push({ role: "user", content: userInput });
     this.historyMessages.push({ role: "assistant", content: finalText });
 
     this.logger.info("run.once.completed", "非流式调用完成", {
-      responseLength: finalText.length
+      responseLength: finalText.length,
     });
     return finalText;
   }
 
-  async runOnceStream(
-    userInput: string,
-    options?: RunOnceStreamOptions
-  ): Promise<string> {
+  async runOnceStream(userInput: string, options?: RunOnceStreamOptions): Promise<string> {
     return this.runOnceStreamCommon(userInput, options, (ctx) =>
       this.runAgentDagLoop(
         ctx.runId,
@@ -243,19 +240,19 @@ export class AgentRuntime extends EventEmitter {
       runId,
       sessionId: this.sessionId,
       turnIndex: this.turnIndex,
-      userInputLength: userInput.length
+      userInputLength: userInput.length,
     });
 
     this.emitRunEvent({
       type: "run.start",
       runId,
-      payload: { userInput, sessionId: this.sessionId, turnIndex: this.turnIndex }
+      payload: { userInput, sessionId: this.sessionId, turnIndex: this.turnIndex },
     });
 
     this.emitRunEvent({
       type: "llm.request",
       runId,
-      payload: { userInput, sessionId: this.sessionId, turnIndex: this.turnIndex }
+      payload: { userInput, sessionId: this.sessionId, turnIndex: this.turnIndex },
     });
 
     try {
@@ -264,7 +261,7 @@ export class AgentRuntime extends EventEmitter {
         runId,
         sessionId: this.sessionId,
         turnIndex: this.turnIndex,
-        userInput
+        userInput,
       };
 
       await executeOnRunStart(plugins, basePluginContext, runId, this.emitPluginOutput.bind(this));
@@ -278,8 +275,8 @@ export class AgentRuntime extends EventEmitter {
         stepGate: {
           enabled: options?.stepMode === true,
           autoMode: options?.autoMode === true,
-          approveToolCall: options?.approveToolCall
-        }
+          approveToolCall: options?.approveToolCall,
+        },
       });
 
       this.historyMessages.push({ role: "user", content: userInput });
@@ -288,22 +285,27 @@ export class AgentRuntime extends EventEmitter {
       this.emitRunEvent({
         type: "llm.completed",
         runId,
-        payload: { finalText, sessionId: this.sessionId, turnIndex: this.turnIndex }
+        payload: { finalText, sessionId: this.sessionId, turnIndex: this.turnIndex },
       });
 
-      await executeOnRunCompleted(plugins, { ...basePluginContext, finalText }, runId, this.emitPluginOutput.bind(this));
+      await executeOnRunCompleted(
+        plugins,
+        { ...basePluginContext, finalText },
+        runId,
+        this.emitPluginOutput.bind(this)
+      );
 
       this.emitRunEvent({
         type: "run.completed",
         runId,
-        payload: { finalText, sessionId: this.sessionId, turnIndex: this.turnIndex }
+        payload: { finalText, sessionId: this.sessionId, turnIndex: this.turnIndex },
       });
 
       this.logger.info("run.stream.completed", "流式调用完成", {
         runId,
         sessionId: this.sessionId,
         turnIndex: this.turnIndex,
-        responseLength: finalText.length
+        responseLength: finalText.length,
       });
 
       return finalText;
@@ -314,21 +316,26 @@ export class AgentRuntime extends EventEmitter {
         runId,
         sessionId: this.sessionId,
         turnIndex: this.turnIndex,
-        userInput
+        userInput,
       };
 
-      await executeOnRunError(plugins, { ...basePluginContext, errorMessage }, runId, this.emitPluginOutput.bind(this));
+      await executeOnRunError(
+        plugins,
+        { ...basePluginContext, errorMessage },
+        runId,
+        this.emitPluginOutput.bind(this)
+      );
 
       this.logger.error("run.stream.error", "流式调用失败", {
         runId,
         sessionId: this.sessionId,
         turnIndex: this.turnIndex,
-        errorMessage
+        errorMessage,
       });
       this.emitRunEvent({
         type: "run.error",
         runId,
-        payload: { errorMessage, sessionId: this.sessionId, turnIndex: this.turnIndex }
+        payload: { errorMessage, sessionId: this.sessionId, turnIndex: this.turnIndex },
       });
       throw error;
     }
@@ -349,7 +356,7 @@ export class AgentRuntime extends EventEmitter {
 
     const workingMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
       ...this.historyMessages.map((m) => ({ role: m.role, content: m.content })),
-      { role: "user", content: userInput }
+      { role: "user", content: userInput },
     ];
 
     // 👑 挂载 WAL 管理器（拦截器）
@@ -359,12 +366,12 @@ export class AgentRuntime extends EventEmitter {
     this.walDao.upsertSession({
       id: this.sessionId,
       title: userInput.slice(0, 50), // 用第一句话做标题
-      head_execution_id: runId
+      head_execution_id: runId,
     });
     this.walDao.insertExecution({
       id: runId,
       session_id: this.sessionId,
-      status: "RUNNING"
+      status: "RUNNING",
     });
 
     const bus = new WeaveEventBus(
@@ -405,9 +412,13 @@ export class AgentRuntime extends EventEmitter {
       : undefined;
 
     // abortSignal 触发时清理挂起字典
-    abortController.signal.addEventListener("abort", () => {
-      pendingRegistry.rejectAll(new Error("DAG 中止"));
-    }, { once: true });
+    abortController.signal.addEventListener(
+      "abort",
+      () => {
+        pendingRegistry.rejectAll(new Error("DAG 中止"));
+      },
+      { once: true }
+    );
 
     // Layer 3 适配器：将引擎事件桥接到 WeaveEventBus
     const turnAdapter = new TurnEngineBusAdapter(bus, runId, this.sessionId);
@@ -435,7 +446,7 @@ export class AgentRuntime extends EventEmitter {
       abortSignal: abortController.signal,
       interceptor,
       pendingRegistry,
-      pauseSignal
+      pauseSignal,
     };
 
     // 初始化 DAG：InputNode（终态广播）→ llm-1（调度起点）
@@ -468,7 +479,7 @@ export class AgentRuntime extends EventEmitter {
             kind: "system",
             title: `运行失败: ${errorMessage}`,
             status: "fail",
-            error: { name: "RunError", message: errorMessage }
+            error: { name: "RunError", message: errorMessage },
           }
         );
       } catch {
@@ -520,17 +531,19 @@ export class AgentRuntime extends EventEmitter {
 
   private activeEventBus?: WeaveEventBus;
 
-  private emitRunEvent(event: Omit<AgentRunEvent, "schemaVersion" | "eventId" | "timestamp">): void {
+  private emitRunEvent(
+    event: Omit<AgentRunEvent, "schemaVersion" | "eventId" | "timestamp">
+  ): void {
     const enrichedEvent: AgentRunEvent = {
       ...event,
       schemaVersion: AgentRuntime.AGENT_EVENT_SCHEMA_VERSION,
       eventId: `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     } as AgentRunEvent;
 
     // 👑 关键：如果当前有活跃的总线，通过总线分发以触发 WAL 拦截
     if (this.activeEventBus && this.activeEventBus.runId === enrichedEvent.runId) {
-      this.activeEventBus.dispatch(enrichedEvent.type, enrichedEvent.payload as any);
+      this.activeEventBus.dispatch(enrichedEvent.type, enrichedEvent.payload);
       return;
     }
 
@@ -539,7 +552,7 @@ export class AgentRuntime extends EventEmitter {
         runId: enrichedEvent.runId,
         eventType: enrichedEvent.type,
         eventId: enrichedEvent.eventId,
-        schemaVersion: enrichedEvent.schemaVersion
+        schemaVersion: enrichedEvent.schemaVersion,
       });
     }
     this.emit("event", enrichedEvent);
@@ -555,8 +568,8 @@ export class AgentRuntime extends EventEmitter {
         payload: {
           pluginName: item.pluginName,
           outputType: item.outputType,
-          outputText: item.outputText
-        }
+          outputText: item.outputText,
+        },
       });
     }
   }

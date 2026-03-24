@@ -28,16 +28,18 @@ export async function executeDag(dag: DagExecutionGraph, ctx: EngineContext): Pr
 
     if (readyIds.length === 0) {
       const pendingIds = dag.getInProgressNodeIds();
-      dag.getEngineEventBus()?.onSchedulerIssue(
-        "deadlock",
-        "DAG 调度死锁：存在未完成节点但无可执行 ready 节点",
-        pendingIds
-      );
+      dag
+        .getEngineEventBus()
+        ?.onSchedulerIssue(
+          "deadlock",
+          "DAG 调度死锁：存在未完成节点但无可执行 ready 节点",
+          pendingIds
+        );
       throw new DagDeadlockError(pendingIds);
     }
 
     // 1. 启动所有并行任务
-    const nodePromises = readyIds.map(id => {
+    const nodePromises = readyIds.map((id) => {
       const node = ctx.nodeRegistry.get(id);
       if (!node) {
         throw new Error(`executeDag: 无法找到可执行节点 ${id}，节点未在 ctx.nodeRegistry 中注册`);
@@ -49,12 +51,12 @@ export async function executeDag(dag: DagExecutionGraph, ctx: EngineContext): Pr
     //    当 Promise.all 因 A 失败而 reject 后，B 随后抛出的 AbortError
     //    会变成 Unhandled Promise Rejection，直接 Crash Node.js 进程！
     //    这行代码让每个 Promise 都有一个 .catch 兜底，消灭悬空异常。
-    nodePromises.forEach(p => p.catch(() => {}));
+    nodePromises.forEach((p) => p.catch(() => {}));
 
     try {
       // 3. Promise.all 毫秒级熔断：任一节点报错，瞬间跳入 catch
       await Promise.all(nodePromises);
-    } catch (error: any) {
+    } catch (error: unknown) {
       // 4. 瞬间广播 abort 信号！其他并行节点在 catch 中自降级
       if (!ctx.abortSignal?.aborted) {
         ctx.abortController?.abort(error);

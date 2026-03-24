@@ -11,6 +11,15 @@ import type { BaseNode } from "../../domain/nodes/base-node.js";
 import type { RunContext } from "../session/run-context.js";
 import { summarizeText, safeJsonStringify } from "../../core/utils/text-utils.js";
 
+/** ToolNode 公开字段的最小接口（避免跨层直接 import ToolNode 实现） */
+interface ToolNodeShape {
+  toolName?: string;
+  toolCallId?: string;
+  step?: number;
+  getEffectiveArgs?(): Record<string, unknown>;
+  args?: Record<string, unknown>;
+}
+
 export interface StepGateInterceptorOptions {
   enabled: boolean;
 }
@@ -26,10 +35,11 @@ export class StepGateInterceptor implements INodeInterceptor {
   }
 
   async waitForApproval(node: BaseNode, ctx: RunContext): Promise<InterceptDecision> {
-    const toolName = (node as any).toolName ?? node.kind;
-    const toolCallId = (node as any).toolCallId ?? node.id;
-    const step = (node as any).step ?? 0;
-    const effectiveArgs = (node as any).getEffectiveArgs?.() ?? (node as any).args ?? {};
+    const tool = node as BaseNode & ToolNodeShape;
+    const toolName = tool.toolName ?? node.kind;
+    const toolCallId = tool.toolCallId ?? node.id;
+    const step = tool.step ?? 0;
+    const effectiveArgs = tool.getEffectiveArgs?.() ?? tool.args ?? {};
 
     // 广播等待审批事件
     ctx.bus.dispatch("node.pending_approval", {
@@ -39,7 +49,7 @@ export class StepGateInterceptor implements INodeInterceptor {
       toolName,
       toolCallId,
       toolArgsText: summarizeText(effectiveArgs),
-      toolArgsJsonText: safeJsonStringify(effectiveArgs)
+      toolArgsJsonText: safeJsonStringify(effectiveArgs),
     });
 
     let decision: InterceptDecision;
@@ -53,13 +63,14 @@ export class StepGateInterceptor implements INodeInterceptor {
         toolCallId,
         nodeId: node.id,
         args: effectiveArgs,
-        argsText: safeJsonStringify(effectiveArgs)
+        argsText: safeJsonStringify(effectiveArgs),
       });
       decision = {
         action: result.action,
-        editedArgs: result.editedArgs && typeof result.editedArgs === "object"
-          ? result.editedArgs as Record<string, unknown>
-          : undefined
+        editedArgs:
+          result.editedArgs && typeof result.editedArgs === "object"
+            ? (result.editedArgs as Record<string, unknown>)
+            : undefined,
       };
     } else {
       // 模式 2：WebSocket — 挂起等待外部 resume()
@@ -75,7 +86,7 @@ export class StepGateInterceptor implements INodeInterceptor {
       toolCallId,
       approvalAction: decision.action,
       toolArgsText: summarizeText(effectiveArgs),
-      toolArgsJsonText: safeJsonStringify(effectiveArgs)
+      toolArgsJsonText: safeJsonStringify(effectiveArgs),
     });
 
     return decision;

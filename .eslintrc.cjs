@@ -24,7 +24,7 @@ module.exports = {
     ],
 
     // ─── 类型安全（渐进式：先 off，逐步收紧到 warn → error）──────────────
-    "@typescript-eslint/no-explicit-any": "off", // TODO P1-1: 逐步消除 as any
+    "@typescript-eslint/no-explicit-any": "warn", // P1-1: 已消除生产代码中的 as any，测试文件豁免
     "@typescript-eslint/no-unsafe-assignment": "off",
     "@typescript-eslint/no-unused-vars": [
       "error",

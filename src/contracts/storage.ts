@@ -73,6 +73,7 @@ export interface IWalDao {
 
   // Edge
   insertEdge(execId: string, sourceNodeId: string, targetNodeId: string, kind: string): void;
+  getEdges(executionId: string): { source: string; target: string; kind: string }[];
 
   // Blackboard
   insertBlackboardMessage(id: string, sessionId: string, role: string, content: string): void;

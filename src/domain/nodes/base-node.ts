@@ -28,7 +28,7 @@ import type { EngineContext } from "../../core/engine/engine-types.js";
 import type { DagNodeStatus } from "../../core/engine/dag-graph.js";
 import type { FrozenSnapshot } from "../../contracts/engine.js";
 
-export abstract class BaseNode<C extends EngineContext = any> {
+export abstract class BaseNode<C extends EngineContext = EngineContext> {
   abstract readonly kind: NodeKind;
   abstract readonly title: string;
 
@@ -71,9 +71,9 @@ export abstract class BaseNode<C extends EngineContext = any> {
   async execute(ctx: C): Promise<void> {
     interface ContextWithCapabilities {
       interceptor?: {
-        shouldIntercept(node: BaseNode<any>, ctx: C): boolean | Promise<boolean>;
+        shouldIntercept(node: BaseNode<C>, ctx: C): boolean | Promise<boolean>;
         waitForApproval(
-          node: BaseNode<any>,
+          node: BaseNode<C>,
           ctx: C
         ): Promise<{ action: string; editedArgs?: Record<string, unknown> }>;
       };
@@ -142,7 +142,7 @@ export abstract class BaseNode<C extends EngineContext = any> {
               // 🛡️ 防御未知指令：一律打回重审
               ctx.logger?.warn(
                 "interceptor.unknown_action",
-                `未知拦截决策: ${(decision as any).action}，继续挂起`
+                `未知拦截决策: ${(decision as { action?: string }).action}，继续挂起`
               );
               continue;
           }
@@ -168,9 +168,10 @@ export abstract class BaseNode<C extends EngineContext = any> {
 
       // 8. 快照触发：success 状态
       this.emitSnapshot(ctx, "success");
-    } catch (error: any) {
+    } catch (error: unknown) {
       // 识别 Abort 信号 → 内部自降级
-      if (error.name === "AbortError" || ctx.abortSignal?.aborted) {
+      const err = error as { name?: string; message?: string };
+      if (err.name === "AbortError" || ctx.abortSignal?.aborted) {
         if (this.status !== "aborted") {
           this.markAborted();
           this.transitionInDag(ctx, "aborted", "execution-aborted-by-engine");
@@ -183,8 +184,8 @@ export abstract class BaseNode<C extends EngineContext = any> {
       // DAG 调度器会看到节点终态（fail），下游节点仍可继续执行
       // 只有 Abort 信号才需要 re-throw 触发全局熔断
       if (this.status !== "aborted" && this.status !== "skipped") {
-        this.markFailed(error);
-        this.transitionInDag(ctx, "fail", error.message);
+        this.markFailed(err as Error);
+        this.transitionInDag(ctx, "fail", err.message);
         this.emitSnapshot(ctx, "fail");
       }
     }
