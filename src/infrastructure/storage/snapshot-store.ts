@@ -60,7 +60,7 @@ export class SnapshotStore {
 
   /** 异步装配：补充 Blob 数据到已有条目 */
   async hydrateEntry(seq: number, payload: BaseNodePayload): Promise<void> {
-    const entry = this.entries.find(e => e.seq === seq);
+    const entry = this.entries.find((e) => e.seq === seq);
     if (entry) entry.payload = payload;
   }
 
@@ -95,9 +95,25 @@ export class SnapshotStore {
     return this.entries;
   }
 
+  /** ISnapshotStore 兼容：获取所有内存中的条目（可写副本） */
+  getAll(): SnapshotEntry[] {
+    return [...this.entries];
+  }
+
+  /** ISnapshotStore 兼容：获取指定节点的所有快照（按 seq 升序） */
+  getByNodeId(nodeId: string): SnapshotEntry[] {
+    return this.entries.filter((e) => e.nodeId === nodeId);
+  }
+
+  /** ISnapshotStore 兼容：获取指定节点的最新快照 */
+  getLatestByNodeId(nodeId: string): SnapshotEntry | undefined {
+    return this.getLatestSnapshot(nodeId);
+  }
+
   /** 确保磁盘路径的父目录存在 */
   private async ensureDir(): Promise<void> {
-    const dir = this.diskPath.substring(0, this.diskPath.lastIndexOf("/")) ||
+    const dir =
+      this.diskPath.substring(0, this.diskPath.lastIndexOf("/")) ||
       this.diskPath.substring(0, this.diskPath.lastIndexOf("\\"));
     if (dir) {
       await fs.promises.mkdir(dir, { recursive: true });
@@ -108,7 +124,7 @@ export class SnapshotStore {
   private async evictToDisk(): Promise<void> {
     await this.ensureDir();
     const chunk = this.entries.splice(0, this.EVICT_BATCH_SIZE);
-    const lines = chunk.map(c => JSON.stringify(c)).join("\n") + "\n";
+    const lines = chunk.map((c) => JSON.stringify(c)).join("\n") + "\n";
     await fs.promises.appendFile(this.diskPath, lines);
   }
 
@@ -116,7 +132,7 @@ export class SnapshotStore {
   async flush(): Promise<void> {
     if (this.entries.length === 0) return;
     await this.ensureDir();
-    const lines = this.entries.map(c => JSON.stringify(c)).join("\n") + "\n";
+    const lines = this.entries.map((c) => JSON.stringify(c)).join("\n") + "\n";
     await fs.promises.appendFile(this.diskPath, lines);
     this.entries.length = 0;
   }

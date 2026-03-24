@@ -1,6 +1,16 @@
 import { defineConfig } from "vitest/config";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      // Vite 5 会剥离 "node:" 前缀导致 node:sqlite 解析失败，用 CJS shim 绕过
+      "node:sqlite": resolve(__dirname, "scripts/sqlite-shim.cjs"),
+    },
+  },
   test: {
     // 测试文件匹配模式
     include: ["src/**/*.spec.ts", "src/**/*.test.ts"],
@@ -8,6 +18,7 @@ export default defineConfig({
 
     // 环境
     environment: "node",
+
 
     // 覆盖率配置
     coverage: {

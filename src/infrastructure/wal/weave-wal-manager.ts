@@ -9,6 +9,7 @@ import { stringify, parse } from "flatted";
 export class WeaveWalManager {
   private eventQueue: AgentRunEvent[] = [];
   private timer: NodeJS.Timeout;
+  private closed = false;
   private readonly BATCH_SIZE = 50;
   private readonly FLUSH_INTERVAL_MS = 10;
 
@@ -27,6 +28,9 @@ export class WeaveWalManager {
    * 核心拦截方法：WeaveEventBus 会在广播前调用此方法。
    */
   public intercept(event: AgentRunEvent): AgentRunEvent {
+    if (this.closed) {
+      throw new Error("WeaveWalManager 已关闭，拒绝写入新事件");
+    }
     // 🛡️ 防守型深拷贝，避免污染原始事件和内存总线
     const eventCopy: AgentRunEvent = {
       ...event,
@@ -143,9 +147,10 @@ export class WeaveWalManager {
   }
 
   /**
-   * 手动关闭（供 AgentRuntime 调用）。
+   * 手动关闭（供 AgentRuntime 调用）。关闭后拒绝接收新事件。
    */
   public destroy(): void {
+    this.closed = true;
     if (this.timer) {
       clearInterval(this.timer);
     }
