@@ -19,6 +19,7 @@
 <br/>
 
 Weave 是一个面向复杂任务设计的**白盒化终端智能体 (CLI Agent) 引擎**。它通过引入有向无环图 (DAG) 拓扑、黑板模式 (Blackboard) 与预写式日志 (WAL)，打破了大语言模型执行时的“黑盒状态”，让 Agent 的每一次推演、工具调用与状态流转都清晰可见且受人控制。
+![WEAVE2](https://github.com/user-attachments/assets/86f1220c-8057-4ed2-9279-2309af9b0cca)
 
 ![WEAVE](https://github.com/user-attachments/assets/92a6c73b-2127-487b-991c-1eac1b208735)
 
