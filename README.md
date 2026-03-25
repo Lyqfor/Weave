@@ -23,8 +23,6 @@ Weave 是一个面向复杂任务设计的**白盒化终端智能体 (CLI Agent)
 
 ![WEAVE2 1](https://github.com/user-attachments/assets/845ca897-8408-40dd-bcff-e7d3b4534893)
 
-![WEAVE](https://github.com/user-attachments/assets/92a6c73b-2127-487b-991c-1eac1b208735)
-
   <br/>
 </div>
 
